@@ -1,0 +1,53 @@
+# ─── Secrets & credentials ────────────────────────────────────────────
+# Nothing that could authenticate as the user may ever be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Garmin OAuth tokens — garminconnect writes these by default to
+# ~/.garminconnect/, but the project can be configured to keep them locally.
+.garminconnect/
+garmin_tokens.json
+oauth1_token.json
+oauth2_token.json
+tokens/
+.playwright-auth/
+storage_state.json
+
+# ─── Personal training data ───────────────────────────────────────────
+# Raw FIT files, the DuckDB database and the manual-import inbox all
+# contain GPS traces and heart-rate data. None of it belongs on GitHub.
+data/
+*.duckdb
+*.duckdb.wal
+*.fit
+*.FIT
+*.tcx
+*.gpx
+!tests/fixtures/*.fit
+
+# ─── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ─── Tooling ──────────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ─── OS / editors ─────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
