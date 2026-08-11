@@ -55,6 +55,11 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ARG", "PTH"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # French text in comments/docstrings
 
+[tool.ruff.lint.per-file-ignores]
+# A pytest fixture requested for its side effect looks like an unused
+# argument, but renaming it would break fixture resolution.
+"tests/*" = ["ARG002"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

@@ -235,6 +235,38 @@ def status() -> None:
 
 
 @app.command()
+def serve(
+    transport: Annotated[
+        str | None,
+        typer.Option("--transport", help="stdio or streamable-http. Overrides the env."),
+    ] = None,
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    port: Annotated[int | None, typer.Option("--port")] = None,
+) -> None:
+    """Run the MCP server.
+
+    Defaults to stdio, which is what a desktop MCP client launches. Nothing is
+    printed to stdout: it carries the JSON-RPC frames, and a single stray line
+    corrupts the stream.
+    """
+    from garmin_mcp.config import Transport
+    from garmin_mcp.server.transports import run_http, run_stdio
+
+    settings = get_settings()
+    chosen = Transport(transport) if transport else settings.mcp_transport
+
+    if not settings.db_path.exists():
+        # Warn rather than refuse: the tools report this cleanly, and a client
+        # that cannot start its server is harder to diagnose than empty results.
+        log.warning("server.no_database", path=str(settings.db_path))
+
+    if chosen is Transport.HTTP:
+        run_http(host or settings.mcp_host, port or settings.mcp_port)
+    else:
+        run_stdio()
+
+
+@app.command()
 def info() -> None:
     """Show what is currently in the database."""
     settings = get_settings()

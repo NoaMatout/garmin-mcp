@@ -57,7 +57,7 @@ class FakeSource:
         self,
         since: date | None = None,
         limit: int = 25,
-        activity_type: str | None = None,  # noqa: ARG002 - protocol conformance
+        activity_type: str | None = None,
     ) -> list[ActivityStub]:
         self.list_calls.append(since)
         stubs = self.stubs
