@@ -120,7 +120,12 @@ class Settings(BaseSettings):
         Sharded by year/month so the directory stays browsable after a few
         thousand activities.
         """
-        return self.raw_dir / f"{started_at_year:04d}" / f"{started_at_month:02d}" / f"{activity_id}.fit"
+        return (
+            self.raw_dir
+            / f"{started_at_year:04d}"
+            / f"{started_at_month:02d}"
+            / f"{activity_id}.fit"
+        )
 
 
 @functools.lru_cache(maxsize=1)

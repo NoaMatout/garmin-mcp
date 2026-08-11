@@ -8,17 +8,98 @@ reading the output — ever has to know that.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 # A semicircle is 2^31 units per 180 degrees. This exact constant is specified
 # by the FIT protocol; do not replace it with an approximation.
 SEMICIRCLES_TO_DEGREES = 180.0 / (2**31)
 
-# Sports where the watch reports one crank/pedal revolution per "cadence" unit
-# and where doubling would be wrong.
-_CYCLING_SPORTS = frozenset({"cycling", "e_biking", "hand_cycling"})
 
-# Sports where FIT reports strides per minute for ONE leg, so the human-facing
-# number (steps per minute) is twice the stored value.
-_RUNNING_SPORTS = frozenset({"running", "walking", "hiking"})
+class CadenceUnit(StrEnum):
+    """What a cadence number actually counts.
+
+    FIT stores "cadence" in three incompatible units depending on the sport,
+    and the field is the same number in all three cases. Getting this wrong
+    silently halves or doubles a metric that athletes read closely.
+    """
+
+    STEPS_PER_MIN = "spm"       # running: FIT counts one leg, humans count both
+    RPM = "rpm"                 # cycling: crank revolutions, already correct
+    STROKES_PER_MIN = "spm_swim"  # swimming/rowing: strokes, already correct
+    UNKNOWN = "unknown"
+
+
+# Sports where FIT reports strides for ONE leg.
+_STRIDE_SPORTS = frozenset(
+    {"running", "walking", "hiking", "trail_running", "snowshoeing"}
+)
+
+# Sports reporting crank/pedal revolutions per minute.
+_RPM_SPORTS = frozenset(
+    {"cycling", "e_biking", "hand_cycling", "cyclocross", "mountain_biking",
+     "gravel_cycling", "indoor_cycling", "virtual_activity"}
+)
+
+# Sports reporting strokes per minute.
+_STROKE_SPORTS = frozenset(
+    {"swimming", "rowing", "paddling", "kayaking", "stand_up_paddleboarding",
+     "open_water_swimming", "surfing", "windsurfing"}
+)
+
+# Sub-sports unambiguous enough to classify a sport FIT reports as `generic`.
+# Values shared between families (`road` is used for both running and cycling)
+# are deliberately absent.
+_STRIDE_SUB_SPORTS = frozenset({"treadmill", "trail", "track", "street", "indoor_running"})
+_RPM_SUB_SPORTS = frozenset(
+    {"indoor_cycling", "spin", "mountain", "cyclocross", "virtual_activity"}
+)
+_STROKE_SUB_SPORTS = frozenset({"lap_swimming", "open_water", "indoor_rowing"})
+
+
+def cadence_unit(
+    sport: str | None,
+    sub_sport: str | None = None,
+    field_name: str | None = None,
+) -> CadenceUnit:
+    """Work out what unit a cadence value is in, for any device.
+
+    Signals are tried strongest first:
+
+    1. **The resolved field name.** When a file declares the sport properly,
+       the FIT profile renames field 18 to `avg_running_cadence` (strides) or
+       leaves it `avg_cadence` (rpm). That naming comes from the file itself,
+       not from any assumption about the device, which makes it the most
+       reliable signal available.
+    2. **The sport.** Covers devices that write a plain `cadence` field.
+    3. **The sub-sport**, but only when the sport is missing or `generic` —
+       some devices report `sport=generic, sub_sport=treadmill`.
+
+    Returns UNKNOWN rather than guessing when nothing matches: leaving a value
+    unconverted is recoverable, silently doubling it is not.
+    """
+    if field_name:
+        lowered = field_name.lower()
+        if "running_cadence" in lowered or "step" in lowered:
+            return CadenceUnit.STEPS_PER_MIN
+        if "stroke" in lowered:
+            return CadenceUnit.STROKES_PER_MIN
+
+    if sport in _STRIDE_SPORTS:
+        return CadenceUnit.STEPS_PER_MIN
+    if sport in _RPM_SPORTS:
+        return CadenceUnit.RPM
+    if sport in _STROKE_SPORTS:
+        return CadenceUnit.STROKES_PER_MIN
+
+    if sport in (None, "generic", "training", "fitness_equipment", "multisport", "all"):
+        if sub_sport in _STRIDE_SUB_SPORTS:
+            return CadenceUnit.STEPS_PER_MIN
+        if sub_sport in _RPM_SUB_SPORTS:
+            return CadenceUnit.RPM
+        if sub_sport in _STROKE_SUB_SPORTS:
+            return CadenceUnit.STROKES_PER_MIN
+
+    return CadenceUnit.UNKNOWN
 
 
 def semicircles_to_degrees(value: int | None) -> float | None:
@@ -32,16 +113,21 @@ def semicircles_to_degrees(value: int | None) -> float | None:
     return value * SEMICIRCLES_TO_DEGREES
 
 
-def normalize_cadence(sport: str | None, cadence: float | None) -> float | None:
-    """Return cadence in the unit a human expects for that sport.
+def normalize_cadence(
+    sport: str | None,
+    cadence: float | None,
+    sub_sport: str | None = None,
+    field_name: str | None = None,
+) -> float | None:
+    """Return cadence in the unit a human expects.
 
-    Running: FIT counts one leg, so 85 stored means 170 steps per minute.
-    Cycling: already revolutions per minute, left alone.
-    Unknown sports are left alone rather than silently doubled.
+    Only stride-based values are transformed — 85 strides for one leg becomes
+    170 steps per minute. Revolutions and strokes are already what the athlete
+    reads, and an unclassifiable sport is left untouched.
     """
     if cadence is None:
         return None
-    if sport in _RUNNING_SPORTS:
+    if cadence_unit(sport, sub_sport, field_name) is CadenceUnit.STEPS_PER_MIN:
         return cadence * 2
     return cadence
 
@@ -85,8 +171,23 @@ def format_duration(seconds: float | None) -> str | None:
 
 
 def is_cycling(sport: str | None) -> bool:
-    return sport in _CYCLING_SPORTS
+    return sport in _RPM_SPORTS
 
 
 def is_running(sport: str | None) -> bool:
-    return sport in _RUNNING_SPORTS
+    return sport in _STRIDE_SPORTS
+
+
+def offset_from_longitude(longitude: float | None) -> int | None:
+    """Rough UTC offset guessed from a GPS position.
+
+    A last resort for files with no `activity` message, where the alternative
+    is pretending the athlete lives in UTC. Fifteen degrees of longitude is one
+    hour, so this lands within an hour of the truth almost everywhere — enough
+    to put a session on the right calendar day, which is what weekly summaries
+    depend on. Political timezones and DST are not modelled, and callers are
+    expected to record that the value was inferred.
+    """
+    if longitude is None or not -180.0 <= longitude <= 180.0:
+        return None
+    return round(longitude / 15.0) * 3600

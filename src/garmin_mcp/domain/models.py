@@ -183,7 +183,14 @@ class ParsedFit:
 
     @property
     def is_multisport(self) -> bool:
-        return self.num_sessions > 1
+        """Whether this file is one multisport event.
+
+        Defined by the presence of an aggregating parent, not by the session
+        count: a file can legitimately hold several sessions that are separate
+        activities — two recordings chained together, or the same one appended
+        twice by a transfer tool.
+        """
+        return self.parent is not None
 
     @property
     def parent(self) -> Activity | None:

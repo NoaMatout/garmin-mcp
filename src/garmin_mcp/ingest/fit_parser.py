@@ -29,6 +29,7 @@ import hashlib
 from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,11 @@ from garmin_mcp.domain.models import (
     Source,
     synthetic_activity_id,
 )
-from garmin_mcp.domain.units import normalize_cadence, semicircles_to_degrees
+from garmin_mcp.domain.units import (
+    normalize_cadence,
+    offset_from_longitude,
+    semicircles_to_degrees,
+)
 from garmin_mcp.errors import FitParseError
 from garmin_mcp.logging import get_logger
 
@@ -93,6 +98,20 @@ def _first(msg: fitdecode.FitDataMessage, *names: str, default: Any = None) -> A
     return default
 
 
+def _first_named(msg: fitdecode.FitDataMessage, *names: str) -> tuple[str | None, Any]:
+    """Like `_first`, but also reports which field matched.
+
+    Which name won is itself information: a file that resolves field 18 to
+    `avg_running_cadence` is telling us the value counts strides, not crank
+    revolutions.
+    """
+    for name in names:
+        value = _val(msg, name)
+        if value is not None:
+            return name, value
+    return None, None
+
+
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -120,6 +139,20 @@ def _as_str(value: Any) -> str | None:
     if value is None:
         return None
     return value if isinstance(value, str) else str(value)
+
+
+def _as_heart_rate(value: Any) -> int | None:
+    """Read a heart rate, treating zero as missing.
+
+    A living athlete never has a heart rate of zero, but some writers — the
+    Zwift file in the test corpus among them — use 0 instead of the FIT invalid
+    sentinel when no strap is connected. Left alone it drags every average down.
+
+    Deliberately not applied to cadence or power, where zero is a real reading:
+    a cyclist coasting downhill produces exactly that.
+    """
+    rate = _as_int(value)
+    return None if rate is None or rate <= 0 else rate
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -152,13 +185,30 @@ class _RawFit:
 
     def __init__(self) -> None:
         self.file_id: fitdecode.FitDataMessage | None = None
-        self.activity: fitdecode.FitDataMessage | None = None
+        # Every `activity` message, not just the first: a file carrying several
+        # is a concatenation of independent recordings, which is the signal
+        # that tells a chained file apart from a genuine triathlon.
+        self.activities: list[fitdecode.FitDataMessage] = []
         self.sessions: list[fitdecode.FitDataMessage] = []
         self.laps: list[fitdecode.FitDataMessage] = []
         self.records: list[fitdecode.FitDataMessage] = []
+        self.truncated = False
+        self.truncation_reason: str | None = None
+
+    @property
+    def activity(self) -> fitdecode.FitDataMessage | None:
+        return self.activities[0] if self.activities else None
 
 
 def _read_messages(path: Path) -> _RawFit:
+    """Read every message, keeping whatever survives a mid-file failure.
+
+    Files truncated by an interrupted download, and files some writers emit
+    with an undefined local message type partway through, still hold complete
+    sessions before the break. Discarding an entire ride because its last
+    kilobyte is damaged loses real data, so the read stops at the error and
+    keeps what came before — as long as a session made it through.
+    """
     raw = _RawFit()
     try:
         with fitdecode.FitReader(str(path)) as reader:
@@ -175,11 +225,24 @@ def _read_messages(path: Path) -> _RawFit:
                     case "file_id":
                         raw.file_id = raw.file_id or frame
                     case "activity":
-                        raw.activity = raw.activity or frame
+                        raw.activities.append(frame)
     except FileNotFoundError:
         raise
     except Exception as exc:  # fitdecode raises a family of parse errors
-        raise FitParseError(f"could not decode FIT file: {exc}", path=str(path)) from exc
+        raw.truncated = True
+        raw.truncation_reason = f"{type(exc).__name__}: {exc}"
+        if not raw.sessions:
+            # Nothing usable came out before the break.
+            raise FitParseError(
+                f"could not decode FIT file: {exc}", path=str(path)
+            ) from exc
+        log.warning(
+            "fit.partial_recovery",
+            path=path.name,
+            reason=raw.truncation_reason,
+            sessions=len(raw.sessions),
+            records=len(raw.records),
+        )
 
     if not raw.sessions:
         raise FitParseError(
@@ -193,9 +256,52 @@ def _read_messages(path: Path) -> _RawFit:
 # ─── time-window assignment ───────────────────────────────────────────
 
 
-def _session_window(msg: fitdecode.FitDataMessage) -> tuple[datetime, datetime] | None:
+def _resolve_session_start(
+    msg: fitdecode.FitDataMessage,
+    raw: _RawFit,
+) -> tuple[datetime | None, str]:
+    """Find a session's start instant, falling back when the field is unusable.
+
+    Old firmware sometimes writes `start_time` as a raw integer that the FIT
+    profile never resolves to a date — the fr70 ANT-FS dumps in the test corpus
+    do exactly that, while the very same file carries a perfectly good
+    `local_timestamp` in its activity message. Rather than drop the ride, try
+    progressively weaker anchors and report which one was used, so the
+    reconstruction is visible in the data instead of silent.
+    """
+    elapsed = _as_float(_first(msg, "total_elapsed_time", "total_timer_time")) or 0.0
+
+    if (start := _as_utc(_val(msg, "start_time"))) is not None:
+        return start, "start_time"
+
+    # The session's own end stamp, walked back by its duration.
+    if (end := _as_utc(_val(msg, "timestamp"))) is not None:
+        return end - timedelta(seconds=elapsed), "session_timestamp"
+
+    # The first sample that carries a real date.
+    for record in raw.records:
+        if (ts := _as_utc(_val(record, "timestamp"))) is not None:
+            return ts, "first_record"
+
+    # The activity message. `local_timestamp` is wall-clock rather than UTC, so
+    # this places the activity on the right day but not the right instant.
+    if raw.activity is not None:
+        if (ts := _as_utc(_val(raw.activity, "timestamp"))) is not None:
+            return ts - timedelta(seconds=elapsed), "activity_timestamp"
+        if (ts := _as_utc(_val(raw.activity, "local_timestamp"))) is not None:
+            return ts - timedelta(seconds=elapsed), "activity_local_timestamp"
+
+    if raw.file_id is not None and (ts := _as_utc(_val(raw.file_id, "time_created"))):
+        return ts, "file_created"
+
+    return None, "none"
+
+
+def _session_window(
+    msg: fitdecode.FitDataMessage, raw: _RawFit
+) -> tuple[datetime, datetime] | None:
     """[start, end] of a session, from its start time and elapsed duration."""
-    start = _as_utc(_val(msg, "start_time"))
+    start, _ = _resolve_session_start(msg, raw)
     if start is None:
         return None
     elapsed = _as_float(_first(msg, "total_elapsed_time", "total_timer_time")) or 0.0
@@ -208,21 +314,32 @@ def _assign_by_window(
 ) -> list[list[Any]]:
     """Bucket timestamped items into ordered, non-overlapping time windows.
 
-    Items falling in a gap between windows (a paused watch, or the seconds
-    between a leg ending and the next starting) attach to the preceding window
-    rather than being dropped — losing samples is worse than a slightly generous
-    boundary.
+    Items falling in a gap between windows — a paused watch, or the seconds
+    between one leg ending and the next starting — attach to the preceding
+    window rather than being dropped: losing samples is worse than a slightly
+    generous boundary.
+
+    Items *before the first window* are discarded, however. Devices record
+    while acquiring GPS: a Fenix 2 file in the test corpus starts logging 45
+    minutes before the athlete pressed start. Attaching those to the first
+    session would give them a negative `elapsed_s` and corrupt every stream
+    query, and they are not part of the activity in the first place.
     """
     buckets: list[list[Any]] = [[] for _ in windows]
     if not windows:
         return buckets
     starts = [w[0] for w in windows]
 
+    dropped = 0
     for ts, item in items:
         idx = bisect_right(starts, ts) - 1
         if idx < 0:
-            idx = 0  # sample predates the first session (device warm-up)
+            dropped += 1
+            continue
         buckets[idx].append(item)
+
+    if dropped:
+        log.debug("fit.pre_activity_samples_dropped", count=dropped)
     return buckets
 
 
@@ -242,7 +359,7 @@ def _build_record(msg: fitdecode.FitDataMessage, session_start: datetime) -> Rec
         altitude_m=_as_float(_first(msg, "enhanced_altitude", "altitude")),
         distance_m=_as_float(_val(msg, "distance")),
         speed_mps=_as_float(_first(msg, "enhanced_speed", "speed")),
-        heart_rate=_as_int(_val(msg, "heart_rate")),
+        heart_rate=_as_heart_rate(_val(msg, "heart_rate")),
         cadence=_as_int(_val(msg, "cadence")),
         power_w=_as_int(_val(msg, "power")),
         temperature_c=_as_int(_val(msg, "temperature")),
@@ -258,7 +375,12 @@ def _build_record(msg: fitdecode.FitDataMessage, session_start: datetime) -> Rec
     )
 
 
-def _build_lap(msg: fitdecode.FitDataMessage, lap_index: int, sport: str | None) -> Lap:
+def _build_lap(
+    msg: fitdecode.FitDataMessage,
+    lap_index: int,
+    sport: str | None,
+    sub_sport: str | None = None,
+) -> Lap:
     return Lap(
         lap_index=lap_index,
         start_time_utc=_as_utc(_val(msg, "start_time")),
@@ -266,9 +388,9 @@ def _build_lap(msg: fitdecode.FitDataMessage, lap_index: int, sport: str | None)
         total_distance_m=_as_float(_val(msg, "total_distance")),
         avg_speed_mps=_as_float(_first(msg, "enhanced_avg_speed", "avg_speed")),
         max_speed_mps=_as_float(_first(msg, "enhanced_max_speed", "max_speed")),
-        avg_heart_rate=_as_int(_val(msg, "avg_heart_rate")),
-        max_heart_rate=_as_int(_val(msg, "max_heart_rate")),
-        avg_cadence=normalize_cadence(sport, _as_float(_val(msg, "avg_cadence"))),
+        avg_heart_rate=_as_heart_rate(_val(msg, "avg_heart_rate")),
+        max_heart_rate=_as_heart_rate(_val(msg, "max_heart_rate")),
+        avg_cadence=_cadence(msg, sport, sub_sport, "avg_running_cadence", "avg_cadence"),
         avg_power_w=_as_float(_val(msg, "avg_power")),
         normalized_power_w=_as_float(_val(msg, "normalized_power")),
         total_ascent_m=_as_float(_val(msg, "total_ascent")),
@@ -306,18 +428,27 @@ def _build_activity(
     session_index: int,
     file_hash: str,
     source: Source,
+    start: datetime,
+    start_source: str,
     tz_offset_seconds: int | None,
+    tz_source: str,
     garmin_activity_id: int | None,
     device_product: str | None,
     device_serial: int | None,
     name: str | None,
 ) -> Activity:
-    start = _as_utc(_val(msg, "start_time"))
-    if start is None:
-        raise FitParseError(f"session {session_index} has no start_time")
-
     sport = _as_str(_val(msg, "sport"))
+    sub_sport = _as_str(_val(msg, "sub_sport"))
     offset = tz_offset_seconds or 0
+
+    extra = _session_extra(msg)
+    # Record how the timestamps were obtained whenever they were not read
+    # straight from the file, so a reconstructed value is never mistaken for a
+    # measured one.
+    if start_source != "start_time":
+        extra["_start_time_source"] = start_source
+    if tz_source != "activity_message":
+        extra["_tz_offset_source"] = tz_source
 
     return Activity(
         activity_id=activity_id,
@@ -329,7 +460,7 @@ def _build_activity(
         session_index=session_index,
         garmin_activity_id=garmin_activity_id,
         sport=sport,
-        sub_sport=_as_str(_val(msg, "sub_sport")),
+        sub_sport=sub_sport,
         name=name,
         tz_offset_seconds=tz_offset_seconds,
         total_timer_time_s=_as_float(_val(msg, "total_timer_time")),
@@ -340,14 +471,10 @@ def _build_activity(
         total_calories=_as_int(_val(msg, "total_calories")),
         avg_speed_mps=_as_float(_first(msg, "enhanced_avg_speed", "avg_speed")),
         max_speed_mps=_as_float(_first(msg, "enhanced_max_speed", "max_speed")),
-        avg_heart_rate=_as_int(_val(msg, "avg_heart_rate")),
-        max_heart_rate=_as_int(_val(msg, "max_heart_rate")),
-        avg_cadence=normalize_cadence(
-            sport, _as_float(_first(msg, "avg_running_cadence", "avg_cadence"))
-        ),
-        max_cadence=normalize_cadence(
-            sport, _as_float(_first(msg, "max_running_cadence", "max_cadence"))
-        ),
+        avg_heart_rate=_as_heart_rate(_val(msg, "avg_heart_rate")),
+        max_heart_rate=_as_heart_rate(_val(msg, "max_heart_rate")),
+        avg_cadence=_cadence(msg, sport, sub_sport, "avg_running_cadence", "avg_cadence"),
+        max_cadence=_cadence(msg, sport, sub_sport, "max_running_cadence", "max_cadence"),
         avg_power_w=_as_float(_val(msg, "avg_power")),
         max_power_w=_as_float(_val(msg, "max_power")),
         normalized_power_w=_as_float(_val(msg, "normalized_power")),
@@ -363,8 +490,19 @@ def _build_activity(
         device_serial=device_serial,
         start_lat=semicircles_to_degrees(_as_int(_val(msg, "start_position_lat"))),
         start_lon=semicircles_to_degrees(_as_int(_val(msg, "start_position_long"))),
-        extra=_session_extra(msg),
+        extra=extra,
     )
+
+
+def _cadence(
+    msg: fitdecode.FitDataMessage,
+    sport: str | None,
+    sub_sport: str | None,
+    *names: str,
+) -> float | None:
+    """Read a cadence field and convert it using whatever unit it is really in."""
+    field_name, value = _first_named(msg, *names)
+    return normalize_cadence(sport, _as_float(value), sub_sport, field_name)
 
 
 def _build_multisport_parent(
@@ -433,6 +571,143 @@ def _build_multisport_parent(
     )
 
 
+# ─── device-agnostic heuristics ───────────────────────────────────────
+#
+# Everything below exists because real files disagree with the specification
+# in ways that only show up across a corpus of different manufacturers.
+
+# Legs of one multisport event follow each other immediately. Anything further
+# apart is a separate outing that happens to share a file.
+_CONTIGUITY_TOLERANCE_S = 300
+
+
+def _elapsed(msg: fitdecode.FitDataMessage) -> float:
+    return _as_float(_first(msg, "total_elapsed_time", "total_timer_time")) or 0.0
+
+
+def _device_identity(
+    file_id: fitdecode.FitDataMessage | None,
+) -> tuple[str | None, int | None]:
+    """Readable device label and serial, for any manufacturer.
+
+    `garmin_product` only resolves for Garmin hardware. Wahoo and SigmaSport
+    write a bare integer, and Coros writes a `product_name` string, so the
+    manufacturer is folded into the label to keep an unresolved code
+    identifiable rather than a naked number.
+    """
+    if file_id is None:
+        return None, None
+
+    serial = _as_int(_val(file_id, "serial_number"))
+    manufacturer = _as_str(_val(file_id, "manufacturer"))
+    _, product = _first_named(file_id, "garmin_product", "product_name", "product")
+
+    if isinstance(product, str) and product.strip():
+        return product.strip(), serial
+    if product is not None:
+        return (f"{manufacturer}:{product}" if manufacturer else str(product)), serial
+    return manufacturer, serial
+
+
+def _dedupe_sessions(
+    resolved: list[tuple[fitdecode.FitDataMessage, datetime, str]],
+) -> list[tuple[fitdecode.FitDataMessage, datetime, str]]:
+    """Drop sessions that are byte-for-byte repeats of one already seen.
+
+    Concatenating a FIT file with itself is a real occurrence — some transfer
+    tools do it — and produces identical session messages. Without this, one
+    ride would be stored twice and every weekly total would be inflated.
+    """
+    seen: set[tuple[datetime, str | None, float]] = set()
+    unique = []
+    for item in resolved:
+        msg, start, _ = item
+        key = (start, _as_str(_val(msg, "sport")), round(_elapsed(msg), 3))
+        if key in seen:
+            log.debug("fit.duplicate_session_dropped", start=start.isoformat())
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _is_multisport(
+    raw: _RawFit,
+    resolved: list[tuple[fitdecode.FitDataMessage, datetime, str]],
+) -> bool:
+    """Decide whether several sessions are one event or several activities.
+
+    More than one session does *not* imply a triathlon. A file can hold several
+    independent recordings chained together, and treating those as legs of a
+    single event would invent an activity that never happened.
+
+    The discriminators, strongest first:
+
+    * **More than one `activity` message** means the file is a concatenation of
+      separate recordings — each declares its own session count.
+    * **A single `activity` message announcing as many sessions as we found**
+      is the device stating outright that this was one multisport event.
+    * With no `activity` message at all, fall back to shape: legs that run
+      back-to-back and cover more than one sport, or that include an explicit
+      `transition`.
+    """
+    if len(resolved) <= 1:
+        return False
+
+    if len(raw.activities) > 1:
+        return False
+
+    if raw.activities:
+        declared = _as_int(_val(raw.activities[0], "num_sessions"))
+        if declared is not None:
+            return declared == len(resolved) and declared > 1
+
+    sports = {_as_str(_val(msg, "sport")) for msg, _, _ in resolved}
+    if "transition" in sports:
+        return True
+
+    contiguous = all(
+        (nxt_start - (start + timedelta(seconds=_elapsed(msg)))).total_seconds()
+        <= _CONTIGUITY_TOLERANCE_S
+        for (msg, start, _), (_, nxt_start, _) in pairwise(resolved)
+    )
+    return contiguous and len(sports) > 1
+
+
+def _resolve_tz_offset(
+    raw: _RawFit,
+    sessions: Sequence[fitdecode.FitDataMessage],
+) -> tuple[int | None, str]:
+    """Determine the athlete's UTC offset, and say where it came from.
+
+    The `activity` message pairs a UTC and a local stamp, which is exact. Many
+    older devices omit that message entirely, and the alternative — pretending
+    the athlete lives in UTC — silently files a Sunday evening run under
+    Monday. Guessing from GPS longitude is imprecise but lands on the right
+    calendar day, which is what weekly summaries actually depend on.
+    """
+    if raw.activity is not None and (offset := _tz_offset(raw.activity)) is not None:
+        return offset, "activity_message"
+
+    longitude = None
+    for msg in sessions:
+        if (longitude := semicircles_to_degrees(
+            _as_int(_val(msg, "start_position_long"))
+        )) is not None:
+            break
+    if longitude is None:
+        for record in raw.records:
+            if (longitude := semicircles_to_degrees(
+                _as_int(_val(record, "position_long"))
+            )) is not None:
+                break
+
+    if (offset := offset_from_longitude(longitude)) is not None:
+        return offset, "longitude_estimate"
+
+    return None, "unavailable"
+
+
 # ─── public entry point ───────────────────────────────────────────────
 
 
@@ -457,27 +732,34 @@ def parse_fit(
     file_hash = file_hash or hash_fit_file(path)
     raw = _read_messages(path)
 
-    # Device identity, shared by every session in the file.
-    device_serial = device_product = None
-    if raw.file_id is not None:
-        device_serial = _as_int(_val(raw.file_id, "serial_number"))
-        device_product = _as_str(
-            _first(raw.file_id, "garmin_product", "product", "manufacturer")
+    device_product, device_serial = _device_identity(raw.file_id)
+
+    # Resolve each session's start, tolerating firmware that omits it, then
+    # drop the duplicates a concatenated file produces.
+    resolved: list[tuple[fitdecode.FitDataMessage, datetime, str]] = []
+    for msg in raw.sessions:
+        start, start_source = _resolve_session_start(msg, raw)
+        if start is not None:
+            resolved.append((msg, start, start_source))
+
+    if not resolved:
+        raise FitParseError(
+            "no session carries a usable start time, and none could be "
+            "reconstructed from the file's other timestamps",
+            path=str(path),
         )
 
-    # Local time offset, from the activity message's paired UTC/local stamps.
-    tz_offset_seconds = None
-    num_sessions = len(raw.sessions)
-    if raw.activity is not None:
-        tz_offset_seconds = _tz_offset(raw.activity)
-        num_sessions = _as_int(_val(raw.activity, "num_sessions")) or num_sessions
+    resolved.sort(key=lambda item: item[1])
+    resolved = _dedupe_sessions(resolved)
 
-    sessions = sorted(raw.sessions, key=lambda m: _as_utc(_val(m, "start_time")) or datetime.min)
-    windows = [w for m in sessions if (w := _session_window(m)) is not None]
-    if len(windows) != len(sessions):
-        raise FitParseError("a session message is missing its start_time", path=str(path))
+    sessions = [msg for msg, _, _ in resolved]
+    windows = [(start, start + timedelta(seconds=_elapsed(msg))) for msg, start, _ in resolved]
 
-    is_multisport = len(sessions) > 1
+    is_multisport = _is_multisport(raw, resolved)
+    num_sessions = len(resolved)
+
+    tz_offset_seconds, tz_source = _resolve_tz_offset(raw, sessions)
+
     lap_buckets = _assign_by_window(
         [(ts, m) for m in raw.laps if (ts := _as_utc(_val(m, "start_time"))) is not None], windows
     )
@@ -487,7 +769,7 @@ def parse_fit(
     )
 
     activities: list[Activity] = []
-    for index, session_msg in enumerate(sessions):
+    for index, (session_msg, start, start_source) in enumerate(resolved):
         # In a multisport file the Garmin id belongs to the parent, so each leg
         # gets its own synthetic id.
         if is_multisport or garmin_activity_id is None:
@@ -501,18 +783,24 @@ def parse_fit(
             session_index=index,
             file_hash=file_hash,
             source=source,
+            start=start,
+            start_source=start_source,
             tz_offset_seconds=tz_offset_seconds,
+            tz_source=tz_source,
             garmin_activity_id=None if is_multisport else garmin_activity_id,
             device_product=device_product,
             device_serial=device_serial,
             name=None if is_multisport else activity_name,
         )
         activity.laps = [
-            _build_lap(m, i, activity.sport) for i, m in enumerate(lap_buckets[index])
+            _build_lap(m, i, activity.sport, activity.sub_sport)
+            for i, m in enumerate(lap_buckets[index])
         ]
         activity.records = _attach_records(
             record_buckets[index], activity.start_time_utc, activity.laps
         )
+        if raw.truncated:
+            activity.extra["_truncated"] = raw.truncation_reason
         activities.append(activity)
 
     if is_multisport:

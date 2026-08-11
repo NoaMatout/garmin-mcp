@@ -73,7 +73,7 @@ class Field:
         if isinstance(value, datetime):
             raw = int(value.timestamp()) - FIT_EPOCH_OFFSET
         else:
-            raw = int(round((value + self.offset) * self.scale))
+            raw = round((value + self.offset) * self.scale)
         return struct.pack("<" + fmt, raw)
 
 
@@ -278,15 +278,24 @@ def build_run(
     with_gps: bool = True,
     with_hr: bool = True,
     laps: int = 2,
+    with_activity_msg: bool = True,
+    manufacturer: int = MANUFACTURER_GARMIN,
+    product: int = FR955_PRODUCT_ID,
+    longitude: float = 4.85,
 ) -> bytes:
-    """A single-session run — the shape of 95% of real files."""
+    """A single-session run — the shape of 95% of real files.
+
+    The optional arguments reproduce behaviours observed across a corpus of
+    real devices: watches that omit the `activity` message entirely, and
+    manufacturers whose product code the FIT profile cannot resolve to a name.
+    """
     start = start or _dt("2026-03-15T07:30:00")
     end_ts = start.timestamp() + duration_s
     speed = distance_m / duration_s
 
     writer = FitWriter()
     writer.add(MSG_FILE_ID, FILE_ID_FIELDS, {
-        "type": 4, "manufacturer": 1, "product": FR955_PRODUCT_ID,
+        "type": 4, "manufacturer": manufacturer, "product": product,
         "serial_number": 3987654321, "time_created": start,
     })
 
@@ -297,7 +306,7 @@ def build_run(
         writer.add(MSG_RECORD, RECORD_FIELDS, {
             "timestamp": ts,
             "position_lat": _deg_to_semicircles(45.75 + i * 0.0001) if with_gps else None,
-            "position_long": _deg_to_semicircles(4.85 + i * 0.0001) if with_gps else None,
+            "position_long": _deg_to_semicircles(longitude + i * 0.0001) if with_gps else None,
             "altitude": 170.0 + (i % 20),
             "heart_rate": 140 + (i % 25) if with_hr else None,
             "cadence": 85 + (i % 4),          # per-leg; parser doubles it
@@ -337,7 +346,7 @@ def build_run(
         "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
         "start_time": start,
         "start_position_lat": _deg_to_semicircles(45.75) if with_gps else None,
-        "start_position_long": _deg_to_semicircles(4.85) if with_gps else None,
+        "start_position_long": _deg_to_semicircles(longitude) if with_gps else None,
         "sport": SPORT["running"],
         "sub_sport": SUB_SPORT["road"],
         "total_elapsed_time": duration_s,
@@ -360,17 +369,40 @@ def build_run(
         "avg_temperature": 14,
     })
 
-    writer.add(MSG_ACTIVITY, ACTIVITY_FIELDS, {
-        "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
-        "total_timer_time": duration_s,
-        "num_sessions": 1,
-        "type": 0,
-        "event": 26,
-        "event_type": 1,
-        # local_timestamp is the same instant expressed in local time.
-        "local_timestamp": datetime.fromtimestamp(end_ts + tz_offset_s, tz=UTC),
-    })
+    if with_activity_msg:
+        writer.add(MSG_ACTIVITY, ACTIVITY_FIELDS, {
+            "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
+            "total_timer_time": duration_s,
+            "num_sessions": 1,
+            "type": 0,
+            "event": 26,
+            "event_type": 1,
+            # local_timestamp is the same instant expressed in local time.
+            "local_timestamp": datetime.fromtimestamp(end_ts + tz_offset_s, tz=UTC),
+        })
     return writer.to_bytes()
+
+
+def build_concatenated(count: int = 2, **kwargs: Any) -> bytes:
+    """The same recording appended to itself.
+
+    Some transfer tools chain FIT files end to end, producing a stream with
+    several headers and several identical `activity` messages. Observed in the
+    wild; without deduplication one ride is stored twice and every weekly
+    total is inflated.
+    """
+    return b"".join(build_run(**kwargs) for _ in range(count))
+
+
+def build_chained_distinct(**kwargs: Any) -> bytes:
+    """Two unrelated recordings in one stream, days apart.
+
+    Two sessions in one file, but two `activity` messages — this is not a
+    triathlon, and must not be collapsed into one.
+    """
+    first = build_run(start=_dt("2026-03-15T07:30:00"), **kwargs)
+    second = build_run(start=_dt("2026-03-18T18:00:00"), **kwargs)
+    return first + second
 
 
 # Olympic-distance triathlon: swim, T1, bike, T2, run.
@@ -402,10 +434,10 @@ def build_triathlon(
     })
 
     cursor = start.timestamp()
-    lap_index = 0
     sessions: list[dict[str, Any]] = []
 
-    for session_index, (sport, sub_sport, distance_m, duration_s) in enumerate(_TRI_LEGS):
+    for lap_index, (sport, sub_sport, distance_m, duration_s) in enumerate(_TRI_LEGS):
+        session_index = lap_index
         leg_start = datetime.fromtimestamp(cursor, tz=UTC)
         speed = distance_m / duration_s if distance_m else 0.0
 
@@ -441,8 +473,6 @@ def build_triathlon(
             "intensity": INTENSITY["active"],
             "lap_trigger": LAP_TRIGGER["session_end"],
         })
-        lap_index += 1
-
         sessions.append({
             "message_index": session_index,
             "timestamp": datetime.fromtimestamp(cursor + duration_s, tz=UTC),
