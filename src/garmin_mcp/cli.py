@@ -13,7 +13,7 @@ from typing import Annotated
 
 import typer
 
-from garmin_mcp.config import get_settings
+from garmin_mcp.config import Backend, get_settings
 from garmin_mcp.db.connection import reading
 from garmin_mcp.db.migrations import SCHEMA_VERSION, init_database
 from garmin_mcp.errors import GarminMcpError
@@ -102,6 +102,136 @@ def import_files(
     typer.echo(report.summary())
     if report.failed:
         raise typer.Exit(1)
+
+
+@app.command()
+def auth(
+    backend: Annotated[
+        Backend | None,
+        typer.Option("--backend", help="Override GARMIN_BACKEND for this login."),
+    ] = None,
+    email: Annotated[
+        str | None, typer.Option("--email", help="Overrides GARMIN_EMAIL.")
+    ] = None,
+) -> None:
+    """Log in to Garmin and save the session.
+
+    The only command that ever handles a password, and the only one that can
+    prompt for an MFA code. Everything else — the sync, the worker, the MCP
+    server — reuses the token this leaves behind, which is what lets them run
+    unattended.
+
+    The password is read from the environment, never written to disk and never
+    logged; only the resulting OAuth token is persisted, owner-readable.
+    """
+    from garmin_mcp.garmin import auth as auth_module
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    chosen = backend or settings.backend
+
+    password = None
+    if chosen is not Backend.PLAYWRIGHT:
+        password = (
+            settings.password.get_secret_value() if settings.password else None
+        ) or typer.prompt("Garmin password", hide_input=True)
+
+    try:
+        profile = auth_module.login(
+            chosen,
+            settings,
+            email=email,
+            password=password,
+            mfa_prompt=lambda: typer.prompt("MFA code"),
+        )
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        password = None
+
+    who = f" as {profile}" if profile else ""
+    typer.secho(f"signed in{who} — session saved to {settings.token_dir}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def sync(
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Maximum activities to pull.")
+    ] = None,
+    since: Annotated[
+        str | None, typer.Option("--since", help="Start date, YYYY-MM-DD.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-download and re-ingest known activities.")
+    ] = False,
+) -> None:
+    """Download new activities from Garmin and ingest them.
+
+    Incremental: only what is newer than the most recent Garmin activity
+    already stored. If Garmin is unreachable, the message says how to keep
+    going through the inbox instead.
+    """
+    from datetime import date as date_type
+
+    from garmin_mcp.garmin.factory import resolve_source
+    from garmin_mcp.ingest.pipeline import sync_from_garmin
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    init_database(settings)
+
+    start = None
+    if since:
+        try:
+            start = date_type.fromisoformat(since)
+        except ValueError as exc:
+            raise typer.BadParameter("--since must look like 2026-03-15") from exc
+
+    try:
+        source, status = resolve_source(settings)
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"using {status.describe()}")
+    try:
+        report = sync_from_garmin(source, settings, limit=limit, since=start, force=force)
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        source.close()
+
+    if not report.outcomes:
+        typer.secho("already up to date", fg=typer.colors.GREEN)
+        return
+    for outcome in report.outcomes:
+        typer.echo(f"  {outcome.status:<9} {outcome.name}")
+    typer.echo(report.summary())
+
+
+@app.command()
+def status() -> None:
+    """Report whether Garmin is currently reachable.
+
+    Never raises: an unusable backend is the answer, not a crash.
+    """
+    from garmin_mcp.garmin.factory import build_source
+
+    settings = get_settings()
+    for backend in (Backend.CFFI, Backend.PLAYWRIGHT):
+        source = build_source(backend, settings)
+        try:
+            result = source.health_check()
+        finally:
+            source.close()
+        colour = typer.colors.GREEN if result.usable else typer.colors.YELLOW
+        typer.secho(f"  {result.describe()}", fg=colour)
+
+    typer.echo()
+    typer.echo("manual import always works: drop FIT files in "
+               f"{settings.inbox_dir} and run `garmin-mcp import`")
 
 
 @app.command()

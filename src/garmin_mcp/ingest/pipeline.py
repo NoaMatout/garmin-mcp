@@ -17,16 +17,18 @@ a year — so it is a first-class citizen, tested as such.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
 
 from garmin_mcp.config import Settings, get_settings
+from garmin_mcp.db import queries
 from garmin_mcp.db.connection import writing
 from garmin_mcp.db.migrations import PARSER_VERSION
 from garmin_mcp.domain.models import Source
-from garmin_mcp.errors import FitParseError, IngestError
+from garmin_mcp.errors import FitParseError, GarminError, GarminRateLimitError, IngestError
+from garmin_mcp.garmin.source import ActivitySource
 from garmin_mcp.ingest import store
 from garmin_mcp.ingest.fit_parser import hash_fit_bytes, parse_fit
 from garmin_mcp.ingest.writer import file_is_ingested, record_file_failure, write_parsed
@@ -221,3 +223,88 @@ def import_inbox(
 
     log.info("inbox.done", summary=report.summary())
     return report
+
+
+def sync_from_garmin(
+    source: ActivitySource,
+    settings: Settings | None = None,
+    *,
+    limit: int | None = None,
+    since: date | None = None,
+    force: bool = False,
+) -> IngestReport:
+    """Download and ingest whatever Garmin has that we do not.
+
+    Incremental by default: the watermark is the newest Garmin-sourced activity
+    already stored, so a routine sync lists a handful of entries and downloads
+    only what is new. Manually imported files are excluded from that watermark
+    — a 2019 file dropped into the inbox last week must not convince the sync
+    that it is up to date.
+
+    Activities are processed oldest first. If the run dies halfway, everything
+    already written stays written and the next sync resumes from there rather
+    than starting over.
+    """
+    settings = settings or get_settings()
+    settings.ensure_dirs()
+    limit = limit or settings.sync_batch_size
+    report = IngestReport()
+
+    with writing(settings) as conn:
+        watermark = since or _watermark(conn)
+        known = queries.known_garmin_ids(conn)
+
+    log.info("sync.listing", since=str(watermark), limit=limit, backend=source.name)
+    stubs = source.list_activities(since=watermark, limit=limit)
+
+    pending = [s for s in stubs if force or s.activity_id not in known]
+    if not pending:
+        log.info("sync.up_to_date", listed=len(stubs))
+        return report
+
+    pending.sort(key=lambda s: s.start_time_utc)
+    log.info("sync.downloading", count=len(pending))
+
+    for stub in pending:
+        label = f"{stub.activity_id} ({stub.sport or 'unknown'})"
+        try:
+            payload = source.download_fit(stub.activity_id)
+        except GarminRateLimitError:
+            # Stop the whole run rather than hammer a service already saying no.
+            log.warning("sync.rate_limited_stopping", completed=len(report.outcomes))
+            report.outcomes.append(FileOutcome(label, "failed", reason="rate limited"))
+            break
+        except GarminError as exc:
+            log.warning("sync.download_failed", activity_id=stub.activity_id, error=str(exc))
+            report.outcomes.append(FileOutcome(label, "failed", reason=str(exc)))
+            continue
+
+        # One short write window per activity: the MCP server cannot read
+        # while this is held, so it is opened and closed per file.
+        with writing(settings) as conn:
+            report.outcomes.append(
+                ingest_bytes(
+                    conn,
+                    payload,
+                    origin=label,
+                    source="garmin",
+                    garmin_activity_id=stub.activity_id,
+                    activity_name=stub.name,
+                    settings=settings,
+                    force=force,
+                )
+            )
+
+    log.info("sync.done", summary=report.summary())
+    return report
+
+
+def _watermark(conn: duckdb.DuckDBPyConnection) -> date | None:
+    """Where to resume from: the day of the newest Garmin activity we hold.
+
+    Deliberately the whole day rather than the exact instant — Garmin reports
+    start times with a granularity that makes an exact cursor prone to skipping
+    an activity recorded moments later.
+    """
+    latest = queries.latest_garmin_start(conn)
+    return latest.date() if latest else None

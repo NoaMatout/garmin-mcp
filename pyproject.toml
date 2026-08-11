@@ -13,6 +13,10 @@ dependencies = [
     "garminconnect>=0.3.9",
     "fitdecode>=0.11.0",
     "duckdb>=1.1.0",
+    # DuckDB converts TIMESTAMPTZ to Python datetimes through pytz and
+    # raises at query time without it. Not a declared duckdb dependency,
+    # so it has to be pinned here or every UTC column read fails.
+    "pytz>=2024.1",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "structlog>=24.4",
