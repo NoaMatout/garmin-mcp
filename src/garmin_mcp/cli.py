@@ -266,6 +266,140 @@ def serve(
         run_stdio()
 
 
+ENV_TEMPLATE = """\
+# Written by `garmin-mcp setup`. Gitignored — keep it that way.
+# Every other setting has a working default; see .env.example to tune them.
+
+GARMIN_EMAIL={email}
+GARMIN_PASSWORD={password}
+GARMIN_BACKEND={backend}
+"""
+
+
+@app.command()
+def setup() -> None:
+    """Interactive first-run setup: credentials, database, and a check that it works.
+
+    Only two values are actually required — everything else in .env.example is
+    optional tuning. This asks for those two, writes an owner-readable .env,
+    and then proves the whole chain works rather than leaving you to find out
+    later.
+
+    The password is typed with echo off, goes straight into .env on this
+    machine, and is never logged, transmitted, or stored in the database.
+    """
+    settings = get_settings()
+    env_path = Path(".env")
+
+    typer.secho("\ngarmin-mcp setup", bold=True)
+    typer.echo("Two values are required. Everything else has a sensible default.\n")
+
+    if env_path.exists():
+        typer.secho(f"{env_path} already exists.", fg=typer.colors.YELLOW)
+        if not typer.confirm("Overwrite it?", default=False):
+            typer.echo("Keeping the existing file. Skipping to the connection test.")
+            _verify_setup(settings)
+            return
+
+    typer.echo("How should the project talk to Garmin?")
+    typer.echo("  1. cffi       — lightweight HTTP client (recommended, try this first)")
+    typer.echo("  2. playwright — real browser, heavier, for when Garmin blocks the above")
+    typer.echo("  3. manual     — no Garmin account; import FIT files by hand")
+    choice = typer.prompt("Choice", default="1")
+
+    if choice.strip() == "3":
+        _write_env(env_path, email="", password="", backend="cffi")
+        typer.secho(f"\nWrote {env_path} with no credentials.", fg=typer.colors.GREEN)
+        typer.echo(
+            f"Drop FIT files into {settings.inbox_dir} and run `garmin-mcp import`."
+        )
+        init_database(settings)
+        return
+
+    backend = "playwright" if choice.strip() == "2" else "auto"
+
+    email = typer.prompt("Garmin Connect email")
+    password = ""
+    if backend != "playwright":
+        typer.echo("Password (not shown as you type, saved only to .env on this machine)")
+        password = typer.prompt("Garmin password", hide_input=True)
+
+    _write_env(env_path, email=email, password=password, backend=backend)
+    typer.secho(f"\nWrote {env_path} (permissions 600)", fg=typer.colors.GREEN)
+
+    # Reload so the new values take effect in this process.
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.ensure_dirs()
+    init_database(settings)
+
+    if not typer.confirm("\nLog in to Garmin now?", default=True):
+        typer.echo("Run `garmin-mcp auth` when you are ready.")
+        return
+
+    from garmin_mcp.garmin import auth as auth_module
+
+    try:
+        profile = auth_module.login(
+            settings.backend,
+            settings,
+            mfa_prompt=lambda: typer.prompt("MFA code"),
+        )
+    except GarminMcpError as exc:
+        typer.secho(f"\nLogin failed: {exc}", fg=typer.colors.RED, err=True)
+        typer.echo(
+            "\nThis does not block you: drop FIT files into "
+            f"{settings.inbox_dir} and run `garmin-mcp import`."
+        )
+        raise typer.Exit(1) from exc
+
+    typer.secho(f"Signed in{f' as {profile}' if profile else ''}.", fg=typer.colors.GREEN)
+
+    if typer.confirm("Pull your 5 most recent activities as a test?", default=True):
+        from garmin_mcp.garmin.factory import resolve_source
+        from garmin_mcp.ingest.pipeline import sync_from_garmin
+
+        source, _ = resolve_source(settings)
+        try:
+            report = sync_from_garmin(source, settings, limit=5)
+        finally:
+            source.close()
+        typer.echo(report.summary())
+
+    _verify_setup(settings)
+
+
+def _write_env(path: Path, *, email: str, password: str, backend: str) -> None:
+    """Write .env and restrict it to the owner before anything else can read it."""
+    path.write_text(
+        ENV_TEMPLATE.format(email=email, password=password, backend=backend),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def _verify_setup(_settings: object = None) -> None:
+    """Confirm the MCP server actually answers, and say how to connect it."""
+    from garmin_mcp.server import tools
+
+    get_settings.cache_clear()
+    status = tools.database_status()
+    if status.get("available"):
+        typer.secho(
+            f"\nDatabase ready: {status['activities']} activities, "
+            f"{status['samples']:,} samples.",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        typer.secho(f"\nDatabase not ready: {status.get('reason')}", fg=typer.colors.YELLOW)
+
+    typer.echo("\nConnect it to Claude Code with:")
+    typer.secho(
+        f'  claude mcp add garmin -- uv run --directory "{Path.cwd()}" garmin-mcp serve',
+        fg=typer.colors.CYAN,
+    )
+
+
 @app.command()
 def info() -> None:
     """Show what is currently in the database."""

@@ -270,3 +270,38 @@ class TestDatabaseStatus:
         status = tools.database_status()
         assert status["available"] is False
         assert "init-db" in status["fix"]
+
+
+class TestSetupWizard:
+    """The first-run experience, which is where a showcase project is judged."""
+
+    def test_writes_an_env_file_only_its_owner_can_read(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A world-readable file holding a Garmin password is a real problem on
+        # a shared machine, and easy to get wrong by writing then chmod-ing.
+        from garmin_mcp.cli import _write_env
+
+        monkeypatch.chdir(tmp_path)
+        env_path = tmp_path / ".env"
+        _write_env(env_path, email="a@b.c", password="hunter2", backend="auto")
+
+        assert env_path.stat().st_mode & 0o777 == 0o600
+        assert "GARMIN_EMAIL=a@b.c" in env_path.read_text()
+
+    def test_the_example_file_marks_what_is_actually_required(self) -> None:
+        # The example previously read as a 30-line form; only two values are
+        # required, and a newcomer should not have to work that out.
+        from pathlib import Path as _Path
+
+        text = _Path(".env.example").read_text()
+        assert "REQUIRED" in text
+        assert "OPTIONAL" in text
+        assert "garmin-mcp setup" in text
+
+    def test_the_example_file_contains_no_real_credentials(self) -> None:
+        from pathlib import Path as _Path
+
+        for line in _Path(".env.example").read_text().splitlines():
+            if line.startswith(("GARMIN_EMAIL=", "GARMIN_PASSWORD=")):
+                assert line.split("=", 1)[1] == "", f"example ships a value: {line}"
