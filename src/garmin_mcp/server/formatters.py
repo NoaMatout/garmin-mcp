@@ -235,8 +235,16 @@ def format_streams(
     activity_id: int,
     total_samples: int,
     returned: int,
+    extrema: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
-    """Wrap the columnar series with the context needed to read them."""
+    """Wrap the columnar series with the context needed to read them.
+
+    `extrema` carries the true peaks over every raw sample, and it is not
+    decoration. The series is averaged, and averaging flattens extremes: on a
+    real ride, a 10-point overview reported a maximum heart rate of 160 against
+    an actual 174. Anyone reading only the series will state that wrong number
+    confidently, so the honest one travels alongside it.
+    """
     rounded = {
         name: [round(v, 4) if isinstance(v, float) else v for v in values]
         for name, values in streams.items()
@@ -247,9 +255,15 @@ def format_streams(
         "source_samples": total_samples,
         "series": rounded,
     }
+
+    if extrema:
+        payload["true_range"] = extrema
+
     if returned < total_samples:
         payload["downsampled"] = (
-            f"averaged {total_samples} samples into {returned} points; "
-            "ask for more with max_points if finer detail is needed"
+            f"averaged {total_samples} samples into {returned} points. "
+            "The series is smoothed, so its highest and lowest values understate "
+            "the real peaks — use true_range for actual minima and maxima, and "
+            "raise max_points for finer shape."
         )
     return payload

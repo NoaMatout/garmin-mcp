@@ -305,3 +305,47 @@ class TestSetupWizard:
         for line in _Path(".env.example").read_text().splitlines():
             if line.startswith(("GARMIN_EMAIL=", "GARMIN_PASSWORD=")):
                 assert line.split("=", 1)[1] == "", f"example ships a value: {line}"
+
+
+class TestTrueRange:
+    """Averaging destroys peaks, so the real ones travel alongside the series.
+
+    Found on live data: a coarse 10-point overview of a real ride reported a
+    maximum heart rate of 160 against an actual 174, and a minimum of 138
+    against 111. A model reading only the smoothed series states those wrong
+    numbers with full confidence — and maximum heart rate is a number athletes
+    take seriously.
+    """
+
+    def test_true_range_is_returned_with_the_series(self, loaded: Settings) -> None:
+        run_id = _ids_by_sport("running")[-1]
+        result = tools.get_activity_streams(run_id, ["heart_rate"], max_points=5)
+        assert "true_range" in result
+        assert {"min", "max", "avg"} <= set(result["true_range"]["heart_rate"])
+
+    def test_true_range_is_unaffected_by_resolution(self, loaded: Settings) -> None:
+        # The whole point: peaks must not move when the series is smoothed.
+        run_id = _ids_by_sport("running")[-1]
+        coarse = tools.get_activity_streams(run_id, ["heart_rate"], max_points=3)
+        fine = tools.get_activity_streams(run_id, ["heart_rate"], max_points=2000)
+        assert coarse["true_range"] == fine["true_range"]
+
+    def test_true_range_brackets_the_smoothed_series(self, loaded: Settings) -> None:
+        run_id = _ids_by_sport("running")[-1]
+        result = tools.get_activity_streams(run_id, ["heart_rate"], max_points=5)
+        smoothed = [v for v in result["series"]["heart_rate"] if v is not None]
+        true = result["true_range"]["heart_rate"]
+        assert max(smoothed) <= true["max"]
+        assert min(smoothed) >= true["min"]
+
+    def test_the_warning_points_at_true_range(self, loaded: Settings) -> None:
+        run_id = _ids_by_sport("running")[-1]
+        result = tools.get_activity_streams(run_id, ["heart_rate"], max_points=5)
+        assert "true_range" in result["downsampled"]
+
+    def test_positions_are_excluded_from_extrema(self, loaded: Settings) -> None:
+        # A min/max latitude is a bounding box, not a meaningful peak.
+        run_id = _ids_by_sport("running")[-1]
+        result = tools.get_activity_streams(run_id, ["lat", "lon", "heart_rate"], max_points=5)
+        assert "lat" not in result["true_range"]
+        assert "heart_rate" in result["true_range"]

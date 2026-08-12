@@ -154,6 +154,10 @@ def get_activity_streams(
     Series are averaged into buckets rather than returned raw — a three-hour
     ride holds around 11 000 samples per channel. Output is columnar:
     {"heart_rate": [...], "elapsed_s": [...]}.
+
+    Because the series is smoothed, its own highest and lowest values
+    understate the real ones. Read peaks from `true_range`, which is
+    computed over every sample.
     """
     activity_id = int(activity_id)
     # Floor of 2 rather than something larger: a caller asking for a coarse
@@ -172,6 +176,7 @@ def get_activity_streams(
             raise ActivityNotFoundError(activity_id)
         total = queries.count_records(conn, activity_id)
         streams = queries.get_streams(conn, activity_id, requested, max_points=max_points)
+        extrema = queries.stream_extrema(conn, activity_id, requested)
 
     returned = len(streams.get("elapsed_s", []))
     if total == 0:
@@ -184,7 +189,11 @@ def get_activity_streams(
 
     log.info("tool.get_activity_streams", activity_id=activity_id, points=returned)
     return formatters.format_streams(
-        streams, activity_id=activity_id, total_samples=total, returned=returned
+        streams,
+        activity_id=activity_id,
+        total_samples=total,
+        returned=returned,
+        extrema=extrema,
     )
 
 

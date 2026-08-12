@@ -343,3 +343,58 @@ def week_activities(
         until=week_start + timedelta(days=6),
         limit=50,
     )
+
+
+def stream_extrema(
+    conn: duckdb.DuckDBPyConnection,
+    activity_id: int,
+    fields: list[str],
+) -> dict[str, dict[str, float]]:
+    """True min, max and mean per field, from the raw samples.
+
+    Down-sampling averages, and averaging destroys extremes: on a real ride of
+    1 513 samples, asking for a 10-point overview reported a maximum heart rate
+    of 160 when the athlete actually reached 174, and a minimum of 138 against
+    a true 111. A model reading only the series will state those wrong numbers
+    with complete confidence.
+
+    So the honest peaks are computed here, over every sample, and returned
+    alongside the series. One extra aggregate scan removes the trap entirely.
+    """
+    usable = [f for f in fields if f in STREAM_FIELDS and f not in ("lat", "lon")]
+    if not usable:
+        return {}
+
+    selects = []
+    for field in usable:
+        column = STREAM_FIELDS[field]
+        selects += [
+            f'min({column}) AS "{field}__min"',
+            f'max({column}) AS "{field}__max"',
+            f'avg({column}) AS "{field}__avg"',
+        ]
+
+    result = conn.execute(
+        f"SELECT {', '.join(selects)} FROM records WHERE activity_id = ?",
+        [activity_id],
+    )
+    row = result.fetchone()
+    if row is None:
+        return {}
+
+    columns = [d[0] for d in result.description]
+    flat = dict(zip(columns, row, strict=True))
+
+    extrema: dict[str, dict[str, float]] = {}
+    for field in usable:
+        stats = {
+            key: flat.get(f"{field}__{key}")
+            for key in ("min", "max", "avg")
+        }
+        if any(value is not None for value in stats.values()):
+            extrema[field] = {
+                key: round(float(value), 2)
+                for key, value in stats.items()
+                if value is not None
+            }
+    return extrema
