@@ -16,8 +16,11 @@ setup: ## Install dependencies and create the database
 	uv sync
 	uv run garmin-mcp init-db
 
-test: ## Run the hermetic test suite (no data required)
-	uv run pytest -q
+test: ## Run the hermetic test suite (no data, no network)
+	# Excludes the corpus tests explicitly rather than relying on them
+	# skipping, so this target means the same thing whether or not the
+	# corpus happens to be downloaded.
+	uv run pytest -q --ignore=tests/test_corpus.py
 
 test-all: corpus ## Run everything, including validation against real devices
 	uv run pytest -q
