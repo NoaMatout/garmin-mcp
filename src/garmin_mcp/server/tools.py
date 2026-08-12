@@ -34,6 +34,10 @@ DEFAULT_LIST_LIMIT = 20
 MAX_STREAM_POINTS = 2000
 DEFAULT_STREAM_POINTS = 200
 MAX_LAPS_RETURNED = 50
+MAX_SYNC_LIMIT = 200
+# Generous: a first backfill downloads and parses dozens of files, and a
+# timeout here would leave the work running with nobody reading the result.
+SYNC_TIMEOUT_S = 180.0
 
 
 def _parse_date(value: str | None, *, field: str) -> date | None:
@@ -286,8 +290,18 @@ def database_status() -> dict[str, Any]:
     def _stamp(value: Any) -> str | None:
         return value.strftime("%Y-%m-%d") if isinstance(value, datetime | date) else None
 
+    from garmin_mcp.ingest.worker import read_worker_status
+
+    worker = read_worker_status(settings)
+
     return {
         "available": True,
+        "sync_worker": (
+            {"running": True, "last_sync": worker.last_sync}
+            if worker.alive
+            else {"running": False, "detail": worker.detail,
+                  "note": "automatic sync is off; use `garmin-mcp sync` manually"}
+        ),
         "activities": counts["activities"],
         "samples": counts["records"],
         "files_parsed": counts["files_parsed"],
@@ -299,3 +313,49 @@ def database_status() -> dict[str, Any]:
             for sport, count, km in sports
         ],
     }
+
+
+def sync_now(limit: int | None = None) -> dict[str, Any]:
+    """Pull new activities from Garmin right now, without leaving the conversation.
+
+    Args:
+        limit: Maximum activities to download (default: the configured batch
+            size, 25).
+
+    Requires the ingest worker to be running — it is the only process allowed
+    to write, since DuckDB grants exclusive access to a single writer. If no
+    worker is listening this fails immediately with instructions, rather than
+    appearing to hang.
+
+    Also imports anything waiting in data/inbox/, which needs neither network
+    nor credentials.
+    """
+    from garmin_mcp.ingest.worker import request_sync
+
+    if limit is not None:
+        limit = max(1, min(int(limit), MAX_SYNC_LIMIT))
+
+    result = request_sync(_settings(), limit=limit, timeout_s=SYNC_TIMEOUT_S)
+
+    summary: dict[str, Any] = {"finished_at": result.get("finished_at")}
+
+    inbox = result.get("inbox") or {}
+    if inbox.get("imported") or inbox.get("failed"):
+        summary["inbox"] = inbox.get("summary")
+
+    garmin = result.get("garmin") or {}
+    if garmin:
+        summary["garmin"] = garmin.get("summary")
+        summary["new_activities"] = garmin.get("activities", 0)
+
+    # Surface a failed sync as content rather than swallowing it: an empty
+    # result and a broken Garmin session look identical otherwise.
+    for key in ("garmin_error", "garmin_hint", "inbox_error"):
+        if result.get(key):
+            summary[key] = result[key]
+
+    if not garmin and not inbox:
+        summary["note"] = "nothing new to ingest"
+
+    log.info("tool.sync_now", new=summary.get("new_activities"))
+    return summary

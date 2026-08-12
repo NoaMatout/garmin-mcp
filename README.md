@@ -114,6 +114,7 @@ uv run garmin-mcp sync --limit 50
 | `sync` | Download and ingest new activities, incrementally |
 | `import` | Ingest FIT files from `data/inbox/` — no network, no credentials |
 | `serve` | Run the MCP server |
+| `worker` | Background sync loop — the only process that writes |
 | `status` | Report whether Garmin is currently reachable |
 | `info` | Show what the database holds |
 
@@ -126,7 +127,8 @@ uv run garmin-mcp sync --limit 50
 | `get_activity_streams` | Columnar time series + true peaks | 200 points, 2000 max |
 | `weekly_summary` | Per-sport totals for one week | one week |
 | `compare_activities` | Two activities with deltas computed | fixed |
-| `database_status` | What is stored, and whether it is reachable | fixed |
+| `database_status` | What is stored, worker health, reachability | fixed |
+| `sync_now` | Pull new activities without leaving the chat | needs the worker |
 
 ## Design decisions
 
@@ -265,8 +267,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 112 tests, hermetic — no data, no network
-make test-all    # 156 tests, adds validation against real recordings
+make test        # 133 tests, hermetic — no data, no network
+make test-all    # 177 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so

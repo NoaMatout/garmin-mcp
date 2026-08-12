@@ -52,16 +52,43 @@ def loaded(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Settings:
     return settings
 
 
+def _registered_tools() -> list:  # type: ignore[type-arg]
+    """What the server actually advertises. `list_tools` is a coroutine."""
+    import asyncio
+
+    return asyncio.run(create_server().list_tools())
+
+
 def _ids_by_sport(sport: str) -> list[int]:
     result = tools.list_activities(activity_type=sport, limit=50)
     return [a["activity_id"] for a in result["activities"]]
 
 
 class TestServerWiring:
-    def test_the_server_registers_every_tool(self) -> None:
-        create_server()  # must not raise
-        assert len(tool_names()) == 6
-        assert "list_activities" in tool_names()
+    def test_the_declared_tool_names_match_what_is_registered(self) -> None:
+        """`tool_names()` is hand-maintained and used by diagnostics.
+
+        Asserting a count would just need bumping whenever a tool is added.
+        The invariant worth holding is that the declared list and the real
+        registration cannot drift apart.
+        """
+        registered = {tool.name for tool in _registered_tools()}
+        assert registered == set(tool_names())
+
+    def test_every_tool_from_the_specification_is_present(self) -> None:
+        required = {
+            "list_activities",
+            "get_activity_detail",
+            "get_activity_streams",
+            "weekly_summary",
+            "compare_activities",
+        }
+        assert required <= set(tool_names())
+
+    def test_every_tool_is_documented_for_the_model(self) -> None:
+        # The description is the only thing a model has to choose a tool by.
+        for tool in _registered_tools():
+            assert tool.description, f"{tool.name} has no description"
 
     def test_there_is_no_generic_sql_tool(self) -> None:
         # A deliberate absence: arbitrary query access for a model is a

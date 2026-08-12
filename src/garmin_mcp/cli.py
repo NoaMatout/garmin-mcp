@@ -401,6 +401,29 @@ def _verify_setup(_settings: object = None) -> None:
 
 
 @app.command()
+def worker() -> None:
+    """Run the ingest worker: periodic sync, and on-demand runs from Claude.
+
+    The only process that writes to the database. DuckDB grants exclusive
+    access to a single writer, so keeping writes in one place is what lets the
+    MCP server read without contention.
+
+    Syncs once at startup, then every GARMIN_SYNC_INTERVAL_MINUTES, and picks
+    up `sync_now` requests within a couple of seconds. Stops cleanly on SIGTERM
+    so `docker stop` does not interrupt a write.
+    """
+    from garmin_mcp.ingest.worker import run_worker
+
+    settings = get_settings()
+    typer.echo(
+        f"worker starting — syncing every {settings.sync_interval_minutes} min, "
+        f"watching {settings.trigger_dir}",
+        err=True,
+    )
+    run_worker(settings)
+
+
+@app.command()
 def info() -> None:
     """Show what is currently in the database."""
     settings = get_settings()
@@ -424,7 +447,14 @@ def info() -> None:
             """
         ).fetchall()
 
+    from garmin_mcp.ingest.worker import read_worker_status
+
+    worker_status = read_worker_status(settings)
     typer.echo(f"database   {settings.db_path} (schema v{SCHEMA_VERSION})")
+    if worker_status.alive:
+        typer.secho(f"worker     running (pid {worker_status.pid})", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"worker     not running — {worker_status.detail}", fg=typer.colors.YELLOW)
     typer.echo(f"files      {files} parsed, {failed} failed")
     typer.echo(f"activities {activities}")
     typer.echo(f"samples    {records:,}")
