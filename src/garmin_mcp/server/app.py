@@ -13,7 +13,6 @@ writes to the database, which is why a broken Garmin session degrades into
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any
 
 from mcp.server import MCPServer
 
@@ -90,10 +89,8 @@ def tool_names() -> list[str]:
     ]
 
 
-def run(transport: str = "stdio", **kwargs: Any) -> None:
-    """Start the server on the given transport.
-
-    In SDK v2 the transport is an argument to `run()`, so stdio and streamable
-    HTTP differ by a parameter rather than by a rewrite.
-    """
-    create_server().run(transport=transport, **kwargs)  # type: ignore[arg-type]
+# Deliberately no generic `run(transport, **kwargs)` wrapper here. SDK v2
+# overloads `run()` per transport so a type checker validates which keywords
+# each one accepts; funnelling everything through `**kwargs` would throw that
+# away and let `port=` on stdio through silently. transports.py calls the
+# typed methods directly instead.

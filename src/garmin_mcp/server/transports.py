@@ -19,7 +19,7 @@ import sys
 
 from garmin_mcp.config import Settings, Transport, get_settings
 from garmin_mcp.logging import get_logger
-from garmin_mcp.server.app import run as run_server
+from garmin_mcp.server.app import create_server
 
 log = get_logger(__name__)
 
@@ -41,7 +41,7 @@ def run_stdio() -> None:
     """Serve over stdio — the mode a desktop MCP client launches."""
     _assert_stdout_is_clean()
     log.info("server.starting", transport="stdio")
-    run_server(transport="stdio")
+    create_server().run(transport="stdio")
 
 
 def run_http(host: str, port: int, *, stateless: bool = False) -> None:
@@ -60,7 +60,7 @@ def run_http(host: str, port: int, *, stateless: bool = False) -> None:
             detail="this server has no authentication; anyone who can reach "
             "this address can read the full training history",
         )
-    run_server(transport="streamable-http", host=host, port=port, stateless_http=stateless)
+    create_server().run(transport="streamable-http", host=host, port=port, stateless_http=stateless)
 
 
 def serve(settings: Settings | None = None) -> None:

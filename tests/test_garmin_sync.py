@@ -153,9 +153,7 @@ class TestSync:
         assert source.downloaded == [1002]
 
     def test_the_watermark_follows_the_newest_garmin_activity(self, db: Settings) -> None:
-        source = FakeSource(
-            [_stub(1001, 0)], payloads={1001: fit_builder.build_run(start=START)}
-        )
+        source = FakeSource([_stub(1001, 0)], payloads={1001: fit_builder.build_run(start=START)})
         sync_from_garmin(source, db)
 
         second = FakeSource([_stub(1002, 5)])
@@ -324,9 +322,7 @@ class TestErrorTranslation:
         from garmin_mcp.garmin.cffi_source import _translate
 
         translated = _translate(
-            garminconnect.GarminConnectAuthenticationError(
-                "Username and password are required"
-            )
+            garminconnect.GarminConnectAuthenticationError("Username and password are required")
         )
         assert isinstance(translated, GarminAuthError)
         assert "garmin-mcp auth" in (translated.hint or "")

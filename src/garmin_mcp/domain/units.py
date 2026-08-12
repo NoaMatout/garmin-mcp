@@ -23,27 +23,41 @@ class CadenceUnit(StrEnum):
     silently halves or doubles a metric that athletes read closely.
     """
 
-    STEPS_PER_MIN = "spm"       # running: FIT counts one leg, humans count both
-    RPM = "rpm"                 # cycling: crank revolutions, already correct
+    STEPS_PER_MIN = "spm"  # running: FIT counts one leg, humans count both
+    RPM = "rpm"  # cycling: crank revolutions, already correct
     STROKES_PER_MIN = "spm_swim"  # swimming/rowing: strokes, already correct
     UNKNOWN = "unknown"
 
 
 # Sports where FIT reports strides for ONE leg.
-_STRIDE_SPORTS = frozenset(
-    {"running", "walking", "hiking", "trail_running", "snowshoeing"}
-)
+_STRIDE_SPORTS = frozenset({"running", "walking", "hiking", "trail_running", "snowshoeing"})
 
 # Sports reporting crank/pedal revolutions per minute.
 _RPM_SPORTS = frozenset(
-    {"cycling", "e_biking", "hand_cycling", "cyclocross", "mountain_biking",
-     "gravel_cycling", "indoor_cycling", "virtual_activity"}
+    {
+        "cycling",
+        "e_biking",
+        "hand_cycling",
+        "cyclocross",
+        "mountain_biking",
+        "gravel_cycling",
+        "indoor_cycling",
+        "virtual_activity",
+    }
 )
 
 # Sports reporting strokes per minute.
 _STROKE_SPORTS = frozenset(
-    {"swimming", "rowing", "paddling", "kayaking", "stand_up_paddleboarding",
-     "open_water_swimming", "surfing", "windsurfing"}
+    {
+        "swimming",
+        "rowing",
+        "paddling",
+        "kayaking",
+        "stand_up_paddleboarding",
+        "open_water_swimming",
+        "surfing",
+        "windsurfing",
+    }
 )
 
 # Sub-sports unambiguous enough to classify a sport FIT reports as `generic`.

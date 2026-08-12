@@ -199,9 +199,7 @@ class TestScheduling:
 
     def test_the_interval_elapses_eventually(self, db: Settings) -> None:
         instance = IngestWorker(db)
-        instance._last_sync = datetime.now(UTC) - timedelta(
-            minutes=db.sync_interval_minutes + 1
-        )
+        instance._last_sync = datetime.now(UTC) - timedelta(minutes=db.sync_interval_minutes + 1)
         assert instance._interval_elapsed()
 
 

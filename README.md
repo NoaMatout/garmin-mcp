@@ -281,6 +281,53 @@ can fabricate a multisport triathlon that the author never actually records.
 The real-device corpus is third-party licensed and gitignored. Every quirk it
 revealed is reproduced synthetically, so regressions are caught without it.
 
+## Docker
+
+```bash
+docker compose up -d ingest          # background sync, the only writer
+docker compose run --rm auth         # log in once (interactive)
+docker compose logs -f ingest
+```
+
+One writer, enforced by the compose file: DuckDB grants exclusive access to a
+single writer and blocks readers while it is held, so only `ingest` may write.
+It stops on SIGTERM with a 30-second grace period rather than being killed
+mid-transaction.
+
+The image runs as a non-root user. `/data` is the only mutable path and the
+only one worth persisting; the build context excludes it entirely, so no
+database, FIT file or token can end up in a layer.
+
+For the stdio transport the MCP client owns the process lifecycle, so register
+the command with the client rather than starting it with compose:
+
+```bash
+claude mcp add garmin -- docker compose -f /abs/path/docker-compose.yml \
+  run --rm -T mcp-stdio
+```
+
+`-T` matters: without it compose allocates a TTY and corrupts the JSON-RPC
+stream on stdout.
+
+| Profile | What it adds |
+|---|---|
+| *(default)* | `ingest` — the sync worker |
+| `tools` | `auth`, `import` — one-shot commands |
+| `http` | `mcp-http` — the server over streamable HTTP, bound to localhost |
+| `playwright` | `ingest-playwright` — Chromium fallback, ~1 GB |
+
+## Continuous integration
+
+GitHub Actions runs, on every push and pull request: ruff (lint and format),
+mypy in strict mode, pytest on Python 3.12 and 3.13, a Docker build with a
+smoke test that the image actually starts, the corpus suite as a job of its
+own, and a scan of **every commit in history** for credentials, databases and
+FIT files.
+
+That last job exists because this repository is built around personal data: a
+secret committed by accident stays recoverable long after it is deleted from
+the working tree, so checking the current state is not enough.
+
 ## Configuration
 
 Two values matter, and only if you want automatic sync:

@@ -14,6 +14,7 @@ from typing import Annotated
 import typer
 
 from garmin_mcp.config import Backend, get_settings
+from garmin_mcp.db import queries
 from garmin_mcp.db.connection import reading
 from garmin_mcp.db.migrations import SCHEMA_VERSION, init_database
 from garmin_mcp.errors import GarminMcpError
@@ -74,9 +75,7 @@ def import_files(
                 raise typer.BadParameter(f"not a file: {path}")
             report = IngestReport()
             with writing(settings) as conn:
-                report.outcomes.append(
-                    ingest_path(conn, path, settings=settings, force=force)
-                )
+                report.outcomes.append(ingest_path(conn, path, settings=settings, force=force))
         else:
             report = import_inbox(settings, force=force, keep_originals=keep)
     except GarminMcpError as exc:
@@ -94,8 +93,10 @@ def import_files(
             "skipped": typer.colors.BLUE,
             "failed": typer.colors.RED,
         }[outcome.status]
-        detail = f" — {outcome.reason}" if outcome.reason else (
-            f" — {outcome.activities} activities, {outcome.records} samples"
+        detail = (
+            f" — {outcome.reason}"
+            if outcome.reason
+            else (f" — {outcome.activities} activities, {outcome.records} samples")
         )
         typer.secho(f"  {outcome.status:<9} {outcome.name}{detail}", fg=colour)
 
@@ -110,9 +111,7 @@ def auth(
         Backend | None,
         typer.Option("--backend", help="Override GARMIN_BACKEND for this login."),
     ] = None,
-    email: Annotated[
-        str | None, typer.Option("--email", help="Overrides GARMIN_EMAIL.")
-    ] = None,
+    email: Annotated[str | None, typer.Option("--email", help="Overrides GARMIN_EMAIL.")] = None,
 ) -> None:
     """Log in to Garmin and save the session.
 
@@ -159,9 +158,7 @@ def sync(
     limit: Annotated[
         int | None, typer.Option("--limit", help="Maximum activities to pull.")
     ] = None,
-    since: Annotated[
-        str | None, typer.Option("--since", help="Start date, YYYY-MM-DD.")
-    ] = None,
+    since: Annotated[str | None, typer.Option("--since", help="Start date, YYYY-MM-DD.")] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Re-download and re-ingest known activities.")
     ] = False,
@@ -230,8 +227,10 @@ def status() -> None:
         typer.secho(f"  {result.describe()}", fg=colour)
 
     typer.echo()
-    typer.echo("manual import always works: drop FIT files in "
-               f"{settings.inbox_dir} and run `garmin-mcp import`")
+    typer.echo(
+        "manual import always works: drop FIT files in "
+        f"{settings.inbox_dir} and run `garmin-mcp import`"
+    )
 
 
 @app.command()
@@ -310,9 +309,7 @@ def setup() -> None:
     if choice.strip() == "3":
         _write_env(env_path, email="", password="", backend="cffi")
         typer.secho(f"\nWrote {env_path} with no credentials.", fg=typer.colors.GREEN)
-        typer.echo(
-            f"Drop FIT files into {settings.inbox_dir} and run `garmin-mcp import`."
-        )
+        typer.echo(f"Drop FIT files into {settings.inbox_dir} and run `garmin-mcp import`.")
         init_database(settings)
         return
 
@@ -386,8 +383,7 @@ def _verify_setup(_settings: object = None) -> None:
     status = tools.database_status()
     if status.get("available"):
         typer.secho(
-            f"\nDatabase ready: {status['activities']} activities, "
-            f"{status['samples']:,} samples.",
+            f"\nDatabase ready: {status['activities']} activities, {status['samples']:,} samples.",
             fg=typer.colors.GREEN,
         )
     else:
@@ -432,12 +428,12 @@ def info() -> None:
         raise typer.Exit(1)
 
     with reading(settings) as conn:
-        activities, first, last = conn.execute(
-            "SELECT count(*), min(start_time_local), max(start_time_local) FROM activities"
-        ).fetchone()
-        records = conn.execute("SELECT count(*) FROM records").fetchone()[0]
-        files = conn.execute("SELECT count(*) FROM files WHERE status = 'parsed'").fetchone()[0]
-        failed = conn.execute("SELECT count(*) FROM files WHERE status = 'failed'").fetchone()[0]
+        counts = queries.activity_counts(conn)
+        activities = counts["activities"]
+        records = counts["records"]
+        files = counts["files_parsed"]
+        failed = counts["files_failed"]
+        first, last = counts["first_activity"], counts["last_activity"]
         by_sport = conn.execute(
             """
             SELECT sport, count(*) AS n, sum(total_distance_m) / 1000 AS km

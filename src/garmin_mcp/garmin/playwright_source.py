@@ -175,9 +175,7 @@ class PlaywrightSource:
                 )
             except Exception as exc:
                 browser.close()
-                raise GarminAuthError(
-                    f"login was not completed within {timeout_s}s"
-                ) from exc
+                raise GarminAuthError(f"login was not completed within {timeout_s}s") from exc
 
             context.storage_state(path=str(self.state_path))
             browser.close()
@@ -227,7 +225,8 @@ class PlaywrightSource:
         return stubs[:limit]
 
     def download_fit(self, activity_id: int) -> bytes:
-        data = self._fetch(f"{DOWNLOAD_PATH}/{activity_id}", binary=True)
+        # _fetch is typed Any because it returns text or bytes by flag.
+        data: bytes = self._fetch(f"{DOWNLOAD_PATH}/{activity_id}", binary=True)
         if not data:
             raise GarminError(f"Garmin returned an empty file for activity {activity_id}")
         return data

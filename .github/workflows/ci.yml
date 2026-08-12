@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep every job away from a developer's real data, and make failures
+  # readable in the Actions log rather than JSON.
+  GARMIN_DATA_DIR: /tmp/ci-data
+  GARMIN_DB_PATH: /tmp/ci-data/garmin.duckdb
+  GARMIN_TOKEN_DIR: /tmp/ci-data/.tokens
+  GARMIN_LOG_FORMAT: console
+  GARMIN_LOG_LEVEL: WARNING
+
+jobs:
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check src tests
+      - name: ruff format
+        run: uv run ruff format --check src tests
+      - name: mypy
+        run: uv run mypy
+
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --frozen
+      # Excludes the corpus tests explicitly. This job must pass with no
+      # network and no data — if it ever needs either, the suite has stopped
+      # being hermetic and that is worth failing over.
+      - name: pytest
+        run: uv run pytest -q --ignore=tests/test_corpus.py
+
+  corpus:
+    name: Real-device corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # Validates the parser against 42 real recordings from 19 devices across
+      # 8 manufacturers. Downloads a third-party corpus, so it is a job of its
+      # own: an upstream change should be visible as a distinct failure rather
+      # than making the main test job look broken.
+      - name: Fetch corpus
+        run: make corpus
+      - name: pytest
+        run: uv run pytest -q tests/test_corpus.py
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: garmin-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # A container that builds but cannot start is not much use. This proves
+      # the entrypoint resolves and the package is importable inside the image.
+      - name: Smoke test the image
+        run: |
+          docker run --rm garmin-mcp:ci --help
+          docker run --rm garmin-mcp:ci status
+
+  secrets:
+    name: No secrets in history
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # This repository is built around personal training data. A credential
+      # or a GPS trace committed by accident stays recoverable in the history
+      # long after it is deleted from the working tree, so the check runs over
+      # every commit rather than the current state.
+      - name: Scan every commit for tracked secrets and personal data
+        run: |
+          set -euo pipefail
+          echo "Checking for files that must never be tracked..."
+          if git log --all --name-only --pretty=format: \
+            | sort -u \
+            | grep -E '(^|/)\.env$|\.duckdb$|garmin_tokens|oauth._token|storage_state|(^|/)data/' \
+            | grep -v '^$'; then
+            echo "::error::a secret or data file was committed at some point in history"
+            exit 1
+          fi
+          echo "Clean."
+      - name: Reject FIT files outside test fixtures
+        run: |
+          set -euo pipefail
+          if git log --all --name-only --pretty=format: \
+            | sort -u \
+            | grep -iE '\.fit$' \
+            | grep -v '^tests/fixtures/'; then
+            echo "::error::a FIT file was committed outside tests/fixtures"
+            exit 1
+          fi
+          echo "Clean."

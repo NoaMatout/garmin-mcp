@@ -1,0 +1,34 @@
+# Everything personal or reproducible. The build context should carry source
+# and nothing else — data/ in particular holds the database, raw FIT files
+# and Garmin tokens.
+data/
+.env
+.env.*
+!.env.example
+*.duckdb
+*.duckdb.wal
+*.fit
+*.FIT
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.git/
+.github/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+tests/
+Makefile
+docker-compose.yml
+.dockerignore
+.DS_Store
+.idea/
+.vscode/

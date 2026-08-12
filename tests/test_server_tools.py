@@ -110,7 +110,7 @@ class TestListActivities:
         assert "transition" not in sports
 
     def test_filtering_by_sport_reveals_legs(self, loaded: Settings) -> None:
-        """"My runs" must include the run inside a triathlon.
+        """ "My runs" must include the run inside a triathlon.
 
         That is the entire justification for storing legs separately.
         """
@@ -154,7 +154,11 @@ class TestActivityDetail:
         detail = tools.get_activity_detail(parent_id)
         assert len(detail["legs"]) == 5
         assert [leg["sport"] for leg in detail["legs"]] == [
-            "swimming", "transition", "cycling", "transition", "running",
+            "swimming",
+            "transition",
+            "cycling",
+            "transition",
+            "running",
         ]
 
     def test_legs_are_marked_as_belonging_to_a_parent(self, loaded: Settings) -> None:
@@ -180,9 +184,7 @@ class TestStreams:
         run_id = _ids_by_sport("running")[-1]
         for requested in (2, 5, 17, 60):
             result = tools.get_activity_streams(run_id, ["heart_rate"], max_points=requested)
-            assert result["points"] <= requested, (
-                f"asked for {requested}, got {result['points']}"
-            )
+            assert result["points"] <= requested, f"asked for {requested}, got {result['points']}"
 
     def test_every_series_has_the_same_length(self, loaded: Settings) -> None:
         run_id = _ids_by_sport("running")[-1]
@@ -261,7 +263,9 @@ class TestCompare:
         deltas = tools.compare_activities(first, second)["delta_b_minus_a"]
         if "pace_verdict" in deltas:
             assert deltas["pace_verdict"] in (
-                "second is faster", "second is slower", "identical",
+                "second is faster",
+                "second is slower",
+                "identical",
             )
 
     def test_comparing_different_sports_warns(self, loaded: Settings) -> None:

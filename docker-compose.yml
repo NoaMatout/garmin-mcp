@@ -1,0 +1,102 @@
+# One writer, and that is the whole design.
+#
+# DuckDB grants exclusive access to a single writer and blocks readers while
+# it is held, so exactly one service here is allowed to write: `ingest`. The
+# MCP server only ever reads.
+#
+#   docker compose up -d ingest        start the background sync
+#   docker compose logs -f ingest      watch it work
+#   docker compose run --rm auth       log in to Garmin (interactive)
+#   docker compose --profile http up   expose the server over HTTP
+#
+# For the usual stdio setup, the MCP client launches the server itself — see
+# the mcp-stdio service below for the command to register.
+
+name: garmin-mcp
+
+x-common: &common
+  build:
+    context: .
+    target: runtime
+  image: garmin-mcp:latest
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - ./data:/data
+  restart: "no"
+
+services:
+  # The only writer. Syncs at startup, then on the configured interval, and
+  # answers sync_now requests from the MCP server within a couple of seconds.
+  ingest:
+    <<: *common
+    container_name: garmin-mcp-ingest
+    command: ["worker"]
+    restart: unless-stopped
+    # SIGTERM stops the loop cleanly; give it room to finish a write rather
+    # than being killed mid-transaction.
+    stop_grace_period: 30s
+
+  # Interactive login. Run it once; the token lands in ./data/.tokens and
+  # every other service reuses it.
+  auth:
+    <<: *common
+    container_name: garmin-mcp-auth
+    command: ["auth"]
+    stdin_open: true
+    tty: true
+    profiles: ["tools"]
+
+  # One-shot manual import — no network, no credentials. Drop FIT files into
+  # ./data/inbox/ and run this.
+  import:
+    <<: *common
+    container_name: garmin-mcp-import
+    command: ["import"]
+    profiles: ["tools"]
+
+  # The MCP server over streamable HTTP, for clients that connect by URL.
+  # Bound to localhost on purpose: this serves a complete training history,
+  # GPS traces included, and has no authentication of its own.
+  mcp-http:
+    <<: *common
+    container_name: garmin-mcp-http
+    command: ["serve", "--transport", "streamable-http", "--host", "0.0.0.0"]
+    environment:
+      GARMIN_MCP_TRANSPORT: streamable-http
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - ingest
+    restart: unless-stopped
+    profiles: ["http"]
+
+  # Not started by compose. Under stdio the MCP client owns the process
+  # lifecycle, so register this command with the client instead:
+  #
+  #   claude mcp add garmin -- docker compose -f /abs/path/docker-compose.yml \
+  #     run --rm -T mcp-stdio
+  #
+  # `-T` matters: without it compose allocates a TTY and corrupts the
+  # JSON-RPC stream that stdout is carrying.
+  mcp-stdio:
+    <<: *common
+    command: ["serve"]
+    profiles: ["manual"]
+
+  # Chromium fallback, for when Garmin refuses the HTTP client outright.
+  # Around a gigabyte, so it is opt-in.
+  ingest-playwright:
+    <<: *common
+    build:
+      context: .
+      target: playwright
+    image: garmin-mcp:playwright
+    container_name: garmin-mcp-ingest-playwright
+    command: ["worker"]
+    environment:
+      GARMIN_BACKEND: playwright
+    restart: unless-stopped
+    stop_grace_period: 30s
+    profiles: ["playwright"]

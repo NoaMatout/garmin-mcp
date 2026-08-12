@@ -144,9 +144,7 @@ def request_sync(
 
     status = read_worker_status(settings)
     if not status.alive:
-        raise WorkerUnavailableError(
-            f"no ingest worker is running ({status.detail})"
-        )
+        raise WorkerUnavailableError(f"no ingest worker is running ({status.detail})")
 
     request_id = uuid.uuid4().hex[:12]
     request_path = settings.trigger_dir / f"sync-{request_id}{REQUEST_SUFFIX}"
@@ -169,8 +167,7 @@ def request_sync(
 
     request_path.unlink(missing_ok=True)
     raise WorkerUnavailableError(
-        f"the worker did not answer within {timeout_s:.0f}s — it may be busy "
-        "with a long sync"
+        f"the worker did not answer within {timeout_s:.0f}s — it may be busy with a long sync"
     )
 
 

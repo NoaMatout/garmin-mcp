@@ -47,9 +47,7 @@ def _parse_date(value: str | None, *, field: str) -> date | None:
     try:
         return date.fromisoformat(value.strip()[:10])
     except ValueError as exc:
-        raise ValueError(
-            f"{field} must be an ISO date such as 2026-03-15, got {value!r}"
-        ) from exc
+        raise ValueError(f"{field} must be an ISO date such as 2026-03-15, got {value!r}") from exc
 
 
 def _settings() -> Settings:
@@ -125,16 +123,12 @@ def get_activity_detail(activity_id: int) -> dict[str, Any]:
 
     if legs:
         detail["legs"] = [formatters.summarize_activity(leg, verbose=True) for leg in legs]
-        detail["note"] = (
-            "this is a multisport event; each leg can also be queried by its own id"
-        )
+        detail["note"] = "this is a multisport event; each leg can also be queried by its own id"
 
     if laps:
         detail["laps"] = [formatters.summarize_lap(lap, row.get("sport")) for lap in laps]
         if total_laps > len(laps):
-            detail["laps_truncated"] = (
-                f"showing the first {len(laps)} of {total_laps} laps"
-            )
+            detail["laps_truncated"] = f"showing the first {len(laps)} of {total_laps} laps"
 
     log.info("tool.get_activity_detail", activity_id=activity_id, laps=len(laps))
     return detail
@@ -171,9 +165,7 @@ def get_activity_streams(
 
     unknown = [f for f in requested if f not in queries.STREAM_FIELDS]
     if unknown:
-        raise ValueError(
-            f"unknown fields {unknown}; available: {sorted(queries.STREAM_FIELDS)}"
-        )
+        raise ValueError(f"unknown fields {unknown}; available: {sorted(queries.STREAM_FIELDS)}")
 
     with reading(_settings()) as conn:
         if queries.get_activity(conn, activity_id) is None:
@@ -299,8 +291,11 @@ def database_status() -> dict[str, Any]:
         "sync_worker": (
             {"running": True, "last_sync": worker.last_sync}
             if worker.alive
-            else {"running": False, "detail": worker.detail,
-                  "note": "automatic sync is off; use `garmin-mcp sync` manually"}
+            else {
+                "running": False,
+                "detail": worker.detail,
+                "note": "automatic sync is off; use `garmin-mcp sync` manually",
+            }
         ),
         "activities": counts["activities"],
         "samples": counts["records"],

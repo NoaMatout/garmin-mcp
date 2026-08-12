@@ -171,12 +171,22 @@ FR955_PRODUCT_ID = 4024
 MANUFACTURER_GARMIN = 1
 
 SPORT = {
-    "generic": 0, "running": 1, "cycling": 2, "transition": 3,
-    "swimming": 5, "training": 10, "multisport": 18,
+    "generic": 0,
+    "running": 1,
+    "cycling": 2,
+    "transition": 3,
+    "swimming": 5,
+    "training": 10,
+    "multisport": 18,
 }
 SUB_SPORT = {
-    "generic": 0, "treadmill": 1, "trail": 3, "road": 7,
-    "indoor_cycling": 6, "lap_swimming": 17, "open_water": 18,
+    "generic": 0,
+    "treadmill": 1,
+    "trail": 3,
+    "road": 7,
+    "indoor_cycling": 6,
+    "lap_swimming": 17,
+    "open_water": 18,
 }
 INTENSITY = {"active": 0, "rest": 1, "warmup": 2, "cooldown": 3}
 LAP_TRIGGER = {"manual": 0, "time": 1, "distance": 2, "session_end": 7}
@@ -185,8 +195,22 @@ LAP_TRIGGER = {"manual": 0, "time": 1, "distance": 2, "session_end": 7}
 # ─── CRC ──────────────────────────────────────────────────────────────
 
 _CRC_TABLE = (
-    0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401,
-    0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400,
+    0x0000,
+    0xCC01,
+    0xD801,
+    0x1400,
+    0xF001,
+    0x3C00,
+    0x2800,
+    0xE401,
+    0xA001,
+    0x6C00,
+    0x7800,
+    0xB401,
+    0x5000,
+    0x9C01,
+    0x8801,
+    0x4400,
 )
 
 
@@ -294,92 +318,115 @@ def build_run(
     speed = distance_m / duration_s
 
     writer = FitWriter()
-    writer.add(MSG_FILE_ID, FILE_ID_FIELDS, {
-        "type": 4, "manufacturer": manufacturer, "product": product,
-        "serial_number": 3987654321, "time_created": start,
-    })
+    writer.add(
+        MSG_FILE_ID,
+        FILE_ID_FIELDS,
+        {
+            "type": 4,
+            "manufacturer": manufacturer,
+            "product": product,
+            "serial_number": 3987654321,
+            "time_created": start,
+        },
+    )
 
     step = max(duration_s // num_records, 1)
     for i in range(num_records):
         elapsed = i * step
         ts = datetime.fromtimestamp(start.timestamp() + elapsed, tz=UTC)
-        writer.add(MSG_RECORD, RECORD_FIELDS, {
-            "timestamp": ts,
-            "position_lat": _deg_to_semicircles(45.75 + i * 0.0001) if with_gps else None,
-            "position_long": _deg_to_semicircles(longitude + i * 0.0001) if with_gps else None,
-            "altitude": 170.0 + (i % 20),
-            "heart_rate": 140 + (i % 25) if with_hr else None,
-            "cadence": 85 + (i % 4),          # per-leg; parser doubles it
-            "distance": speed * elapsed,
-            "speed": speed,
-            "power": 260 + (i % 30),
-            "temperature": 14,
-        })
+        writer.add(
+            MSG_RECORD,
+            RECORD_FIELDS,
+            {
+                "timestamp": ts,
+                "position_lat": _deg_to_semicircles(45.75 + i * 0.0001) if with_gps else None,
+                "position_long": _deg_to_semicircles(longitude + i * 0.0001) if with_gps else None,
+                "altitude": 170.0 + (i % 20),
+                "heart_rate": 140 + (i % 25) if with_hr else None,
+                "cadence": 85 + (i % 4),  # per-leg; parser doubles it
+                "distance": speed * elapsed,
+                "speed": speed,
+                "power": 260 + (i % 30),
+                "temperature": 14,
+            },
+        )
 
     lap_duration = duration_s / laps
     for lap_index in range(laps):
         lap_start = datetime.fromtimestamp(start.timestamp() + lap_index * lap_duration, tz=UTC)
-        writer.add(MSG_LAP, LAP_FIELDS, {
-            "message_index": lap_index,
-            "timestamp": datetime.fromtimestamp(
-                start.timestamp() + (lap_index + 1) * lap_duration, tz=UTC
-            ),
-            "start_time": lap_start,
-            "total_elapsed_time": lap_duration,
-            "total_timer_time": lap_duration,
-            "total_distance": distance_m / laps,
-            "total_calories": 150,
-            "avg_speed": speed,
-            "max_speed": speed * 1.2,
-            "avg_heart_rate": 150 if with_hr else None,
-            "max_heart_rate": 168 if with_hr else None,
-            "avg_cadence": 86,
-            "avg_power": 265,
-            "total_ascent": 20,
-            "total_descent": 18,
-            "intensity": INTENSITY["active"],
-            "lap_trigger": LAP_TRIGGER["distance"],
-        })
+        writer.add(
+            MSG_LAP,
+            LAP_FIELDS,
+            {
+                "message_index": lap_index,
+                "timestamp": datetime.fromtimestamp(
+                    start.timestamp() + (lap_index + 1) * lap_duration, tz=UTC
+                ),
+                "start_time": lap_start,
+                "total_elapsed_time": lap_duration,
+                "total_timer_time": lap_duration,
+                "total_distance": distance_m / laps,
+                "total_calories": 150,
+                "avg_speed": speed,
+                "max_speed": speed * 1.2,
+                "avg_heart_rate": 150 if with_hr else None,
+                "max_heart_rate": 168 if with_hr else None,
+                "avg_cadence": 86,
+                "avg_power": 265,
+                "total_ascent": 20,
+                "total_descent": 18,
+                "intensity": INTENSITY["active"],
+                "lap_trigger": LAP_TRIGGER["distance"],
+            },
+        )
 
-    writer.add(MSG_SESSION, SESSION_FIELDS, {
-        "message_index": 0,
-        "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
-        "start_time": start,
-        "start_position_lat": _deg_to_semicircles(45.75) if with_gps else None,
-        "start_position_long": _deg_to_semicircles(longitude) if with_gps else None,
-        "sport": SPORT["running"],
-        "sub_sport": SUB_SPORT["road"],
-        "total_elapsed_time": duration_s,
-        "total_timer_time": duration_s,
-        "total_distance": distance_m,
-        "total_calories": 420,
-        "avg_speed": speed,
-        "max_speed": speed * 1.25,
-        "avg_heart_rate": 152 if with_hr else None,
-        "max_heart_rate": 171 if with_hr else None,
-        "avg_cadence": 86,
-        "max_cadence": 92,
-        "avg_power": 265,
-        "max_power": 340,
-        "total_ascent": 42,
-        "total_descent": 40,
-        "total_training_effect": 3.4,
-        "num_laps": laps,
-        "normalized_power": 272,
-        "avg_temperature": 14,
-    })
+    writer.add(
+        MSG_SESSION,
+        SESSION_FIELDS,
+        {
+            "message_index": 0,
+            "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
+            "start_time": start,
+            "start_position_lat": _deg_to_semicircles(45.75) if with_gps else None,
+            "start_position_long": _deg_to_semicircles(longitude) if with_gps else None,
+            "sport": SPORT["running"],
+            "sub_sport": SUB_SPORT["road"],
+            "total_elapsed_time": duration_s,
+            "total_timer_time": duration_s,
+            "total_distance": distance_m,
+            "total_calories": 420,
+            "avg_speed": speed,
+            "max_speed": speed * 1.25,
+            "avg_heart_rate": 152 if with_hr else None,
+            "max_heart_rate": 171 if with_hr else None,
+            "avg_cadence": 86,
+            "max_cadence": 92,
+            "avg_power": 265,
+            "max_power": 340,
+            "total_ascent": 42,
+            "total_descent": 40,
+            "total_training_effect": 3.4,
+            "num_laps": laps,
+            "normalized_power": 272,
+            "avg_temperature": 14,
+        },
+    )
 
     if with_activity_msg:
-        writer.add(MSG_ACTIVITY, ACTIVITY_FIELDS, {
-            "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
-            "total_timer_time": duration_s,
-            "num_sessions": 1,
-            "type": 0,
-            "event": 26,
-            "event_type": 1,
-            # local_timestamp is the same instant expressed in local time.
-            "local_timestamp": datetime.fromtimestamp(end_ts + tz_offset_s, tz=UTC),
-        })
+        writer.add(
+            MSG_ACTIVITY,
+            ACTIVITY_FIELDS,
+            {
+                "timestamp": datetime.fromtimestamp(end_ts, tz=UTC),
+                "total_timer_time": duration_s,
+                "num_sessions": 1,
+                "type": 0,
+                "event": 26,
+                "event_type": 1,
+                # local_timestamp is the same instant expressed in local time.
+                "local_timestamp": datetime.fromtimestamp(end_ts + tz_offset_s, tz=UTC),
+            },
+        )
     return writer.to_bytes()
 
 
@@ -428,10 +475,17 @@ def build_triathlon(
     """
     start = start or _dt("2026-06-15T08:00:00")
     writer = FitWriter()
-    writer.add(MSG_FILE_ID, FILE_ID_FIELDS, {
-        "type": 4, "manufacturer": 1, "product": FR955_PRODUCT_ID,
-        "serial_number": 3987654321, "time_created": start,
-    })
+    writer.add(
+        MSG_FILE_ID,
+        FILE_ID_FIELDS,
+        {
+            "type": 4,
+            "manufacturer": 1,
+            "product": FR955_PRODUCT_ID,
+            "serial_number": 3987654321,
+            "time_created": start,
+        },
+    )
 
     cursor = start.timestamp()
     sessions: list[dict[str, Any]] = []
@@ -444,54 +498,72 @@ def build_triathlon(
         step = max(duration_s // records_per_leg, 1)
         for i in range(records_per_leg):
             elapsed = i * step
-            writer.add(MSG_RECORD, RECORD_FIELDS, {
-                "timestamp": datetime.fromtimestamp(cursor + elapsed, tz=UTC),
-                "position_lat": _deg_to_semicircles(43.60 + i * 0.0002),
-                "position_long": _deg_to_semicircles(1.44 + i * 0.0002),
-                "altitude": 150.0,
-                "heart_rate": {"swimming": 145, "transition": 130, "cycling": 152,
-                               "running": 165}[sport],
-                "cadence": 80,
-                "distance": speed * elapsed,
-                "speed": speed,
-                "power": 240 if sport == "cycling" else None,
-                "temperature": 22,
-            })
+            writer.add(
+                MSG_RECORD,
+                RECORD_FIELDS,
+                {
+                    "timestamp": datetime.fromtimestamp(cursor + elapsed, tz=UTC),
+                    "position_lat": _deg_to_semicircles(43.60 + i * 0.0002),
+                    "position_long": _deg_to_semicircles(1.44 + i * 0.0002),
+                    "altitude": 150.0,
+                    "heart_rate": {
+                        "swimming": 145,
+                        "transition": 130,
+                        "cycling": 152,
+                        "running": 165,
+                    }[sport],
+                    "cadence": 80,
+                    "distance": speed * elapsed,
+                    "speed": speed,
+                    "power": 240 if sport == "cycling" else None,
+                    "temperature": 22,
+                },
+            )
 
-        writer.add(MSG_LAP, LAP_FIELDS, {
-            "message_index": lap_index,
-            "timestamp": datetime.fromtimestamp(cursor + duration_s, tz=UTC),
-            "start_time": leg_start,
-            "total_elapsed_time": duration_s,
-            "total_timer_time": duration_s,
-            "total_distance": distance_m,
-            "total_calories": 200,
-            "avg_speed": speed,
-            "max_speed": speed * 1.1 if speed else None,
-            "avg_heart_rate": 150,
-            "max_heart_rate": 170,
-            "intensity": INTENSITY["active"],
-            "lap_trigger": LAP_TRIGGER["session_end"],
-        })
-        sessions.append({
-            "message_index": session_index,
-            "timestamp": datetime.fromtimestamp(cursor + duration_s, tz=UTC),
-            "start_time": leg_start,
-            "start_position_lat": _deg_to_semicircles(43.60),
-            "start_position_long": _deg_to_semicircles(1.44),
-            "sport": SPORT[sport],
-            "sub_sport": SUB_SPORT[sub_sport],
-            "total_elapsed_time": duration_s,
-            "total_timer_time": duration_s,
-            "total_distance": distance_m,
-            "total_calories": 200,
-            "avg_speed": speed,
-            "max_speed": speed * 1.1 if speed else None,
-            "avg_heart_rate": {"swimming": 145, "transition": 130, "cycling": 152,
-                               "running": 165}[sport],
-            "max_heart_rate": 175,
-            "num_laps": 1,
-        })
+        writer.add(
+            MSG_LAP,
+            LAP_FIELDS,
+            {
+                "message_index": lap_index,
+                "timestamp": datetime.fromtimestamp(cursor + duration_s, tz=UTC),
+                "start_time": leg_start,
+                "total_elapsed_time": duration_s,
+                "total_timer_time": duration_s,
+                "total_distance": distance_m,
+                "total_calories": 200,
+                "avg_speed": speed,
+                "max_speed": speed * 1.1 if speed else None,
+                "avg_heart_rate": 150,
+                "max_heart_rate": 170,
+                "intensity": INTENSITY["active"],
+                "lap_trigger": LAP_TRIGGER["session_end"],
+            },
+        )
+        sessions.append(
+            {
+                "message_index": session_index,
+                "timestamp": datetime.fromtimestamp(cursor + duration_s, tz=UTC),
+                "start_time": leg_start,
+                "start_position_lat": _deg_to_semicircles(43.60),
+                "start_position_long": _deg_to_semicircles(1.44),
+                "sport": SPORT[sport],
+                "sub_sport": SUB_SPORT[sub_sport],
+                "total_elapsed_time": duration_s,
+                "total_timer_time": duration_s,
+                "total_distance": distance_m,
+                "total_calories": 200,
+                "avg_speed": speed,
+                "max_speed": speed * 1.1 if speed else None,
+                "avg_heart_rate": {
+                    "swimming": 145,
+                    "transition": 130,
+                    "cycling": 152,
+                    "running": 165,
+                }[sport],
+                "max_heart_rate": 175,
+                "num_laps": 1,
+            }
+        )
         cursor += duration_s
 
     # Real devices emit every session message after all of its data.
@@ -499,25 +571,36 @@ def build_triathlon(
         writer.add(MSG_SESSION, SESSION_FIELDS, session)
 
     total = cursor - start.timestamp()
-    writer.add(MSG_ACTIVITY, ACTIVITY_FIELDS, {
-        "timestamp": datetime.fromtimestamp(cursor, tz=UTC),
-        "total_timer_time": total,
-        "num_sessions": len(_TRI_LEGS),
-        "type": 0,
-        "event": 26,
-        "event_type": 1,
-        "local_timestamp": datetime.fromtimestamp(cursor + tz_offset_s, tz=UTC),
-    })
+    writer.add(
+        MSG_ACTIVITY,
+        ACTIVITY_FIELDS,
+        {
+            "timestamp": datetime.fromtimestamp(cursor, tz=UTC),
+            "total_timer_time": total,
+            "num_sessions": len(_TRI_LEGS),
+            "type": 0,
+            "event": 26,
+            "event_type": 1,
+            "local_timestamp": datetime.fromtimestamp(cursor + tz_offset_s, tz=UTC),
+        },
+    )
     return writer.to_bytes()
 
 
 def build_without_session() -> bytes:
     """A valid FIT file that is not an activity — must be rejected cleanly."""
     writer = FitWriter()
-    writer.add(MSG_FILE_ID, FILE_ID_FIELDS, {
-        "type": 2, "manufacturer": 1, "product": FR955_PRODUCT_ID,
-        "serial_number": 1, "time_created": _dt("2026-01-01T00:00:00"),
-    })
+    writer.add(
+        MSG_FILE_ID,
+        FILE_ID_FIELDS,
+        {
+            "type": 2,
+            "manufacturer": 1,
+            "product": FR955_PRODUCT_ID,
+            "serial_number": 1,
+            "time_created": _dt("2026-01-01T00:00:00"),
+        },
+    )
     return writer.to_bytes()
 
 

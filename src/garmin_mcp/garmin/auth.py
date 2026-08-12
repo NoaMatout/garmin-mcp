@@ -60,9 +60,7 @@ def login_cffi(
     """
     settings = settings or get_settings()
     email = email or settings.email
-    password = password or (
-        settings.password.get_secret_value() if settings.password else None
-    )
+    password = password or (settings.password.get_secret_value() if settings.password else None)
 
     if not email or not password:
         raise GarminAuthError(
@@ -136,9 +134,7 @@ def login(
         return None
 
     try:
-        return login_cffi(
-            settings, email=email, password=password, mfa_prompt=mfa_prompt
-        )
+        return login_cffi(settings, email=email, password=password, mfa_prompt=mfa_prompt)
     except GarminError as exc:
         if backend is not Backend.AUTO:
             raise

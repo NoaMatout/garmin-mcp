@@ -56,17 +56,42 @@ log = get_logger(__name__)
 # Session fields mapped to explicit columns; everything else goes to `extra`.
 _MAPPED_SESSION_FIELDS = frozenset(
     {
-        "start_time", "timestamp", "sport", "sub_sport", "event", "event_type",
-        "total_elapsed_time", "total_timer_time", "total_distance",
-        "total_ascent", "total_descent", "total_calories",
-        "avg_speed", "max_speed", "enhanced_avg_speed", "enhanced_max_speed",
-        "avg_heart_rate", "max_heart_rate", "avg_cadence", "max_cadence",
-        "avg_running_cadence", "max_running_cadence",
-        "avg_power", "max_power", "normalized_power",
-        "intensity_factor", "training_stress_score",
-        "total_training_effect", "total_anaerobic_training_effect",
-        "avg_temperature", "pool_length", "total_strokes", "num_laps",
-        "start_position_lat", "start_position_long", "message_index",
+        "start_time",
+        "timestamp",
+        "sport",
+        "sub_sport",
+        "event",
+        "event_type",
+        "total_elapsed_time",
+        "total_timer_time",
+        "total_distance",
+        "total_ascent",
+        "total_descent",
+        "total_calories",
+        "avg_speed",
+        "max_speed",
+        "enhanced_avg_speed",
+        "enhanced_max_speed",
+        "avg_heart_rate",
+        "max_heart_rate",
+        "avg_cadence",
+        "max_cadence",
+        "avg_running_cadence",
+        "max_running_cadence",
+        "avg_power",
+        "max_power",
+        "normalized_power",
+        "intensity_factor",
+        "training_stress_score",
+        "total_training_effect",
+        "total_anaerobic_training_effect",
+        "avg_temperature",
+        "pool_length",
+        "total_strokes",
+        "num_laps",
+        "start_position_lat",
+        "start_position_long",
+        "message_index",
     }
 )
 
@@ -233,9 +258,7 @@ def _read_messages(path: Path) -> _RawFit:
         raw.truncation_reason = f"{type(exc).__name__}: {exc}"
         if not raw.sessions:
             # Nothing usable came out before the break.
-            raise FitParseError(
-                f"could not decode FIT file: {exc}", path=str(path)
-            ) from exc
+            raise FitParseError(f"could not decode FIT file: {exc}", path=str(path)) from exc
         log.warning(
             "fit.partial_recovery",
             path=path.name,
@@ -691,15 +714,15 @@ def _resolve_tz_offset(
 
     longitude = None
     for msg in sessions:
-        if (longitude := semicircles_to_degrees(
-            _as_int(_val(msg, "start_position_long"))
-        )) is not None:
+        if (
+            longitude := semicircles_to_degrees(_as_int(_val(msg, "start_position_long")))
+        ) is not None:
             break
     if longitude is None:
         for record in raw.records:
-            if (longitude := semicircles_to_degrees(
-                _as_int(_val(record, "position_long"))
-            )) is not None:
+            if (
+                longitude := semicircles_to_degrees(_as_int(_val(record, "position_long")))
+            ) is not None:
                 break
 
     if (offset := offset_from_longitude(longitude)) is not None:

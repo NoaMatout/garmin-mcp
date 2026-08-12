@@ -73,5 +73,7 @@ packages = ["garmin_mcp"]
 
 [[tool.mypy.overrides]]
 # Neither ships type stubs.
-module = ["fitdecode.*", "garminconnect.*"]
+# Neither ships type stubs; playwright is an optional extra that is not
+# installed in the default environment or in CI.
+module = ["fitdecode.*", "garminconnect.*", "playwright.*"]
 ignore_missing_imports = true

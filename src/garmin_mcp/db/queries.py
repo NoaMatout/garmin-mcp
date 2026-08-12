@@ -18,6 +18,20 @@ from typing import Any
 import duckdb
 
 
+def _one(result: duckdb.DuckDBPyRelation | Any) -> tuple[Any, ...]:
+    """Fetch a row that an aggregate query must always produce.
+
+    `fetchone()` is typed as optional and genuinely returns None for an empty
+    result set. Indexing it directly fails with an opaque TypeError far from
+    the cause, so aggregates that cannot legitimately return nothing are
+    funnelled through here.
+    """
+    row = result.fetchone()
+    if row is None:  # pragma: no cover - an aggregate always yields a row
+        raise RuntimeError("aggregate query returned no row")
+    return row
+
+
 def latest_garmin_start(conn: duckdb.DuckDBPyConnection) -> datetime | None:
     """When the newest Garmin-sourced activity began.
 
@@ -25,17 +39,14 @@ def latest_garmin_start(conn: duckdb.DuckDBPyConnection) -> datetime | None:
     2019 file dropped into the inbox last week must not make the next sync
     believe it is already up to date.
     """
-    row = conn.execute(
-        "SELECT max(start_time_utc) FROM activities WHERE source = 'garmin'"
-    ).fetchone()
-    return row[0] if row and row[0] else None
+    row = _one(conn.execute("SELECT max(start_time_utc) FROM activities WHERE source = 'garmin'"))
+    return row[0] if row[0] else None
 
 
 def known_garmin_ids(conn: duckdb.DuckDBPyConnection) -> set[int]:
     """Every Garmin activity id already stored, parents and legs alike."""
     rows = conn.execute(
-        "SELECT DISTINCT garmin_activity_id FROM activities "
-        "WHERE garmin_activity_id IS NOT NULL"
+        "SELECT DISTINCT garmin_activity_id FROM activities WHERE garmin_activity_id IS NOT NULL"
     ).fetchall()
     return {int(row[0]) for row in rows}
 
@@ -52,19 +63,17 @@ def failed_file_hashes(conn: duckdb.DuckDBPyConnection) -> set[str]:
 
 def activity_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     """Headline numbers for `garmin-mcp info` and the server's health output."""
-    activities, first, last = conn.execute(
-        """
-        SELECT count(*), min(start_time_local), max(start_time_local)
-        FROM activities
-        """
-    ).fetchone()
-    records = conn.execute("SELECT count(*) FROM records").fetchone()[0]
-    parsed = conn.execute(
-        "SELECT count(*) FROM files WHERE status = 'parsed'"
-    ).fetchone()[0]
-    failed = conn.execute(
-        "SELECT count(*) FROM files WHERE status = 'failed'"
-    ).fetchone()[0]
+    activities, first, last = _one(
+        conn.execute(
+            """
+            SELECT count(*), min(start_time_local), max(start_time_local)
+            FROM activities
+            """
+        )
+    )
+    records = _one(conn.execute("SELECT count(*) FROM records"))[0]
+    parsed = _one(conn.execute("SELECT count(*) FROM files WHERE status = 'parsed'"))[0]
+    failed = _one(conn.execute("SELECT count(*) FROM files WHERE status = 'failed'"))[0]
     return {
         "activities": activities,
         "records": records,
@@ -155,9 +164,7 @@ def list_activities(
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
 
-def get_activity(
-    conn: duckdb.DuckDBPyConnection, activity_id: int
-) -> dict[str, Any] | None:
+def get_activity(conn: duckdb.DuckDBPyConnection, activity_id: int) -> dict[str, Any] | None:
     """One activity's full summary row, or None when the id is unknown."""
     result = conn.execute(
         "SELECT * EXCLUDE (extra) FROM v_activity_summary WHERE activity_id = ?",
@@ -202,17 +209,13 @@ def get_laps(
 
 def count_laps(conn: duckdb.DuckDBPyConnection, activity_id: int) -> int:
     return int(
-        conn.execute(
-            "SELECT count(*) FROM laps WHERE activity_id = ?", [activity_id]
-        ).fetchone()[0]
+        _one(conn.execute("SELECT count(*) FROM laps WHERE activity_id = ?", [activity_id]))[0]
     )
 
 
 def count_records(conn: duckdb.DuckDBPyConnection, activity_id: int) -> int:
     return int(
-        conn.execute(
-            "SELECT count(*) FROM records WHERE activity_id = ?", [activity_id]
-        ).fetchone()[0]
+        _one(conn.execute("SELECT count(*) FROM records WHERE activity_id = ?", [activity_id]))[0]
     )
 
 
@@ -258,9 +261,7 @@ def get_streams(
     """
     unknown = [f for f in fields if f not in STREAM_FIELDS]
     if unknown:
-        raise ValueError(
-            f"unknown stream fields: {unknown}. Available: {sorted(STREAM_FIELDS)}"
-        )
+        raise ValueError(f"unknown stream fields: {unknown}. Available: {sorted(STREAM_FIELDS)}")
 
     total = count_records(conn, activity_id)
     if total == 0:
@@ -279,7 +280,7 @@ def get_streams(
 
     result = conn.execute(
         f"""
-        SELECT {', '.join(selects)}
+        SELECT {", ".join(selects)}
         FROM (
             -- `//` is integer division. Plain `/` returns a DOUBLE in DuckDB,
             -- which gives almost every row its own bucket and silently
@@ -294,14 +295,10 @@ def get_streams(
 
     columns = [d[0] for d in result.description]
     rows = result.fetchall()
-    return {
-        column: [row[i] for row in rows] for i, column in enumerate(columns)
-    }
+    return {column: [row[i] for row in rows] for i, column in enumerate(columns)}
 
 
-def weekly_summary(
-    conn: duckdb.DuckDBPyConnection, week_start: date
-) -> list[dict[str, Any]]:
+def weekly_summary(conn: duckdb.DuckDBPyConnection, week_start: date) -> list[dict[str, Any]]:
     """Per-sport totals for one week, Monday to Sunday.
 
     Counts top-level activities only, so a triathlon contributes its combined
@@ -333,9 +330,7 @@ def weekly_summary(
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
 
-def week_activities(
-    conn: duckdb.DuckDBPyConnection, week_start: date
-) -> list[dict[str, Any]]:
+def week_activities(conn: duckdb.DuckDBPyConnection, week_start: date) -> list[dict[str, Any]]:
     """The individual sessions making up a week, for context under the totals."""
     return list_activities(
         conn,
@@ -387,14 +382,9 @@ def stream_extrema(
 
     extrema: dict[str, dict[str, float]] = {}
     for field in usable:
-        stats = {
-            key: flat.get(f"{field}__{key}")
-            for key in ("min", "max", "avg")
-        }
+        stats = {key: flat.get(f"{field}__{key}") for key in ("min", "max", "avg")}
         if any(value is not None for value in stats.values()):
             extrema[field] = {
-                key: round(float(value), 2)
-                for key, value in stats.items()
-                if value is not None
+                key: round(float(value), 2) for key, value in stats.items() if value is not None
             }
     return extrema

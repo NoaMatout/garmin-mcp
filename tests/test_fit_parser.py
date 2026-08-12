@@ -82,9 +82,7 @@ class TestUnitConversion:
         bike = _leg(parsed, "cycling")
         assert bike.avg_cadence is None or bike.avg_cadence <= 120
 
-    def test_local_time_offset_is_derived_from_the_activity_message(
-        self, run_fit: Path
-    ) -> None:
+    def test_local_time_offset_is_derived_from_the_activity_message(self, run_fit: Path) -> None:
         activity = parse_fit(run_fit).activities[0]
         assert activity.tz_offset_seconds == 7200
         assert activity.start_time_utc.hour == 7
@@ -105,7 +103,12 @@ class TestMultisport:
     def test_transitions_are_preserved_as_sessions(self, triathlon_fit: Path) -> None:
         sports = [a.sport for a in parse_fit(triathlon_fit).activities]
         assert sports == [
-            "multisport", "swimming", "transition", "cycling", "transition", "running",
+            "multisport",
+            "swimming",
+            "transition",
+            "cycling",
+            "transition",
+            "running",
         ]
 
     def test_children_point_at_the_parent(self, triathlon_fit: Path) -> None:
@@ -246,9 +249,7 @@ class TestDeviceAgnosticHeuristics:
     committed; see tests/test_corpus.py for the opt-in run against it.
     """
 
-    def test_a_file_concatenated_with_itself_yields_one_activity(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_file_concatenated_with_itself_yields_one_activity(self, tmp_path: Path) -> None:
         # Observed in activity-activity-filecrc.fit: two headers, two identical
         # sessions. Counting it twice would inflate every weekly total.
         path = _write(tmp_path, "twice.fit", fit_builder.build_concatenated(2))
@@ -265,9 +266,7 @@ class TestDeviceAgnosticHeuristics:
         assert len(parsed.activities) == 2
         assert all(a.parent_activity_id is None for a in parsed.activities)
 
-    def test_missing_activity_message_falls_back_to_longitude(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_activity_message_falls_back_to_longitude(self, tmp_path: Path) -> None:
         # Several Edge and fr110 files carry no activity message at all.
         # Pretending the athlete lives in UTC files a Sunday run under Monday.
         path = _write(
@@ -279,9 +278,7 @@ class TestDeviceAgnosticHeuristics:
         assert activity.tz_offset_seconds == 0  # 4.85°E rounds to UTC+0
         assert activity.extra["_tz_offset_source"] == "longitude_estimate"
 
-    def test_longitude_fallback_lands_on_the_right_side_of_the_globe(
-        self, tmp_path: Path
-    ) -> None:
+    def test_longitude_fallback_lands_on_the_right_side_of_the_globe(self, tmp_path: Path) -> None:
         path = _write(
             tmp_path,
             "tokyo.fit",
@@ -290,9 +287,7 @@ class TestDeviceAgnosticHeuristics:
         activity = parse_fit(path).activities[0]
         assert activity.tz_offset_seconds == 9 * 3600
 
-    def test_offset_is_marked_unavailable_when_there_is_no_signal(
-        self, tmp_path: Path
-    ) -> None:
+    def test_offset_is_marked_unavailable_when_there_is_no_signal(self, tmp_path: Path) -> None:
         # An indoor trainer session: no activity message, no GPS.
         path = _write(
             tmp_path,
@@ -309,9 +304,7 @@ class TestDeviceAgnosticHeuristics:
         assert "_tz_offset_source" not in activity.extra
         assert "_start_time_source" not in activity.extra
 
-    def test_unresolvable_product_code_keeps_the_manufacturer(
-        self, tmp_path: Path
-    ) -> None:
+    def test_unresolvable_product_code_keeps_the_manufacturer(self, tmp_path: Path) -> None:
         # Wahoo writes product 28; the FIT profile cannot name it, and a bare
         # "28" in the database is useless.
         path = _write(
@@ -324,9 +317,7 @@ class TestDeviceAgnosticHeuristics:
         assert "28" in activity.device_product
         assert "wahoo" in activity.device_product.lower()
 
-    def test_truncated_file_keeps_the_sessions_that_survived(
-        self, tmp_path: Path
-    ) -> None:
+    def test_truncated_file_keeps_the_sessions_that_survived(self, tmp_path: Path) -> None:
         # The Strava Android export breaks mid-file but has already written a
         # complete session; discarding the whole ride would lose real data.
         good = fit_builder.build_run(num_records=40)
@@ -336,9 +327,7 @@ class TestDeviceAgnosticHeuristics:
         assert len(parsed.activities) == 1
         assert parsed.activities[0].extra.get("_truncated")
 
-    def test_partial_recovery_is_refused_when_no_session_survived(
-        self, corrupt_fit: Path
-    ) -> None:
+    def test_partial_recovery_is_refused_when_no_session_survived(self, corrupt_fit: Path) -> None:
         # nick.fit loses its session to truncation: nothing usable remains.
         with pytest.raises(FitParseError):
             parse_fit(corrupt_fit)

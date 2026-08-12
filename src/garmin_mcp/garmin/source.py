@@ -25,10 +25,10 @@ from garmin_mcp.domain.models import ActivityStub
 
 class SourceHealth(StrEnum):
     OK = "ok"
-    NEEDS_AUTH = "needs_auth"       # no token, or it expired — a human must log in
-    BLOCKED = "blocked"             # Cloudflare refused the client outright
-    RATE_LIMITED = "rate_limited"   # back off and retry later
-    UNAVAILABLE = "unavailable"     # network down, Garmin down, backend not installed
+    NEEDS_AUTH = "needs_auth"  # no token, or it expired — a human must log in
+    BLOCKED = "blocked"  # Cloudflare refused the client outright
+    RATE_LIMITED = "rate_limited"  # back off and retry later
+    UNAVAILABLE = "unavailable"  # network down, Garmin down, backend not installed
 
 
 @dataclass(frozen=True, slots=True)

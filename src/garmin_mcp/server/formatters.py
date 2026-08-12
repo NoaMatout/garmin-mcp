@@ -150,13 +150,9 @@ def summarize_week(rows: list[dict[str, Any]], week_start: date) -> dict[str, An
                 {
                     "activities": sum(r.get("activities") or 0 for r in rows),
                     "distance_km": _round(sum(r.get("distance_km") or 0 for r in rows), 1),
-                    "moving_time": format_duration(
-                        sum(r.get("moving_time_s") or 0 for r in rows)
-                    ),
+                    "moving_time": format_duration(sum(r.get("moving_time_s") or 0 for r in rows)),
                     "ascent_m": _round(sum(r.get("ascent_m") or 0 for r in rows), 0),
-                    "training_load": _round(
-                        sum(r.get("training_load") or 0 for r in rows), 1
-                    ),
+                    "training_load": _round(sum(r.get("training_load") or 0 for r in rows), 1),
                 }
             ),
             "by_sport": by_sport,
@@ -212,8 +208,11 @@ def compare(
         difference = round(b_pace - a_pace)
         deltas["pace_s_per_km"] = difference
         deltas["pace_verdict"] = (
-            "second is faster" if difference < 0 else
-            "second is slower" if difference > 0 else "identical"
+            "second is faster"
+            if difference < 0
+            else "second is slower"
+            if difference > 0
+            else "identical"
         )
 
     return {

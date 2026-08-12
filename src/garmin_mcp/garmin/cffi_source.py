@@ -104,9 +104,7 @@ class CffiSource:
         try:
             import garminconnect
         except ImportError as exc:  # pragma: no cover - dependency is declared
-            raise GarminError(
-                "garminconnect is not installed; run `uv sync`"
-            ) from exc
+            raise GarminError("garminconnect is not installed; run `uv sync`") from exc
 
         token_dir = self._settings.token_dir
         if not token_dir.is_dir() or not any(token_dir.iterdir()):
@@ -121,9 +119,7 @@ class CffiSource:
             raise _translate(exc) from exc
 
         self._client = client
-        self._profile = getattr(client, "display_name", None) or getattr(
-            client, "full_name", None
-        )
+        self._profile = getattr(client, "display_name", None) or getattr(client, "full_name", None)
         log.info("garmin.session_resumed", backend=self.name, profile=self._profile)
         return client
 

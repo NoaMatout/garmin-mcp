@@ -56,9 +56,7 @@ class TestIdempotency:
         assert second.skipped == 1
         assert _counts(db) == after_first
 
-    def test_the_same_file_under_a_different_name_is_recognised(
-        self, db: Settings
-    ) -> None:
+    def test_the_same_file_under_a_different_name_is_recognised(self, db: Settings) -> None:
         # Identity is the content hash, not the filename — Garmin and a manual
         # export name the same ride differently.
         data = fit_builder.build_run()
@@ -133,9 +131,7 @@ class TestMultisportPersistence:
         assert parents == 1
         assert legs == 5
 
-    def test_running_volume_includes_the_leg_inside_a_triathlon(
-        self, db: Settings
-    ) -> None:
+    def test_running_volume_includes_the_leg_inside_a_triathlon(self, db: Settings) -> None:
         # The reason the parent/child split exists at all.
         _drop_in_inbox(db, "tri.fit", fit_builder.build_triathlon())
         import_inbox(db)
@@ -171,9 +167,7 @@ class TestFailureHandling:
         assert (db.inbox_failed_dir / "broken.fit").exists()
 
         with duckdb.connect(str(db.db_path), read_only=True) as conn:
-            status, error = conn.execute(
-                "SELECT status, error FROM files"
-            ).fetchone()
+            status, error = conn.execute("SELECT status, error FROM files").fetchone()
         assert status == "failed"
         assert error
 
