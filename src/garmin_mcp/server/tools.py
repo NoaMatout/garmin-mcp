@@ -678,3 +678,74 @@ def compare_to_plan(activity_id: int) -> dict[str, Any]:
     result["has_plan"] = True
     log.info("tool.compare_to_plan", activity_id=activity_id, steps=len(steps))
     return result
+
+
+def list_scheduled_workouts(month: str | None = None) -> dict[str, Any]:
+    """List the workouts placed on the athlete's Garmin calendar.
+
+    Args:
+        month: Any ISO date in the month of interest, e.g. "2026-08-17".
+            Defaults to the current month.
+
+    Returns each planned session with its date, its `workout_id` (the session
+    in the library) and its `schedule_id` (this particular placement on the
+    calendar). Removing something from the calendar needs the schedule_id;
+    deleting the session itself needs the workout_id.
+
+    Call this before acting on a request like "delete next week's runs" —
+    the library alone does not say what is planned, and matching on names is
+    how the wrong session gets deleted.
+    """
+    from garmin_mcp.ingest.worker import request_workout
+
+    anchor = _parse_date(month, field="month") or date.today()
+    result = request_workout(
+        {"action": "list_scheduled", "year": anchor.year, "month": anchor.month},
+        _settings(),
+    )
+    if result.get("error"):
+        return {"scheduled": [], "error": result["error"], "fix": result.get("hint")}
+
+    scheduled = result.get("scheduled", [])
+    log.info("tool.list_scheduled_workouts", month=anchor.strftime("%Y-%m"), count=len(scheduled))
+    return {
+        "month": anchor.strftime("%Y-%m"),
+        "count": len(scheduled),
+        "scheduled": [{k: v for k, v in entry.items() if v is not None} for entry in scheduled],
+    }
+
+
+def unschedule_workout(schedule_id: int, confirm: bool = False) -> dict[str, Any]:
+    """Take a workout off the calendar, keeping it in the library.
+
+    Args:
+        schedule_id: From list_scheduled_workouts — not the workout_id.
+        confirm: Must be true to actually remove it.
+
+    Use this rather than delete_workout when the athlete wants to move or drop
+    a planned session but keep the session itself.
+    """
+    from garmin_mcp.ingest.worker import request_workout
+
+    settings = _settings()
+    if not settings.enable_writes:
+        return {
+            "unscheduled": False,
+            "error": "writing to Garmin is disabled on this installation",
+        }
+
+    schedule_id = int(schedule_id)
+    if not confirm:
+        return {
+            "unscheduled": False,
+            "would_remove": schedule_id,
+            "note": "the workout stays in the library; only the calendar entry goes",
+            "next_step": "call again with confirm=true",
+        }
+
+    result = request_workout({"action": "unschedule", "schedule_id": schedule_id}, settings)
+    if result.get("error"):
+        return {"unscheduled": False, "error": result["error"], "fix": result.get("hint")}
+
+    log.info("tool.unschedule_workout", schedule_id=schedule_id)
+    return {"unscheduled": True, "schedule_id": schedule_id}

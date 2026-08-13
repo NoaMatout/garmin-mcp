@@ -74,11 +74,13 @@ def create_server() -> MCPServer:
         tools.create_workout,
         tools.delete_workout,
         tools.schedule_workout,
+        tools.list_scheduled_workouts,
+        tools.unschedule_workout,
         tools.set_activity_notes,
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=13)
+    log.info("server.created", tools=15)
     return mcp
 
 
@@ -97,6 +99,8 @@ def tool_names() -> list[str]:
         "create_workout",
         "delete_workout",
         "schedule_workout",
+        "list_scheduled_workouts",
+        "unschedule_workout",
         "set_activity_notes",
     ]
 

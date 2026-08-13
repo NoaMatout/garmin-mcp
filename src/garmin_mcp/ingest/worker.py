@@ -421,6 +421,19 @@ class IngestWorker:
             if action == "delete":
                 workout_writer.delete_workout(int(payload["workout_id"]), self.settings)
                 return {"finished_at": finished, "deleted": int(payload["workout_id"])}
+            if action == "list_scheduled":
+                return {
+                    "finished_at": finished,
+                    "scheduled": workout_writer.list_scheduled(
+                        int(payload["year"]), int(payload["month"]), self.settings
+                    ),
+                }
+            if action == "unschedule":
+                workout_writer.unschedule(int(payload["schedule_id"]), self.settings)
+                return {
+                    "finished_at": finished,
+                    "unscheduled": int(payload["schedule_id"]),
+                }
             if action == "schedule":
                 workout_writer.schedule_workout(
                     int(payload["workout_id"]), str(payload["date"]), self.settings

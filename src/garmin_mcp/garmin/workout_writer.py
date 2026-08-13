@@ -114,6 +114,61 @@ def list_workouts(
     return workouts
 
 
+def list_scheduled(
+    year: int,
+    month: int,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    """Workouts placed on the calendar in a given month.
+
+    Reading, and unglamorous, but its absence caused real trouble: without it
+    a model can see the workout library and not which sessions are actually
+    planned, so "delete next week's runs" becomes guesswork against names.
+    """
+    settings = settings or get_settings()
+    client = _client(settings)
+
+    try:
+        # Month is 1-based, verified against the live API: 8 returns August.
+        raw = client.get_scheduled_workouts(year, month)
+    except Exception as exc:
+        from garmin_mcp.garmin.cffi_source import _translate
+
+        raise _translate(exc) from exc
+
+    items = raw.get("calendarItems", []) if isinstance(raw, dict) else (raw or [])
+    scheduled = [
+        {
+            "schedule_id": item.get("id"),
+            "workout_id": item.get("workoutId"),
+            "date": item.get("date"),
+            "name": item.get("title"),
+            "sport": item.get("sportTypeKey"),
+        }
+        for item in items
+        if item.get("itemType") == "workout"
+    ]
+    scheduled.sort(key=lambda entry: str(entry.get("date")))
+    log.info("workout.scheduled_listed", year=year, month=month, count=len(scheduled))
+    return scheduled
+
+
+def unschedule(schedule_id: int, settings: Settings | None = None) -> None:
+    """Take a workout off the calendar, leaving it in the library."""
+    settings = settings or get_settings()
+    if not settings.enable_writes:
+        raise WritesDisabledError()
+
+    client = _client(settings)
+    try:
+        client.unschedule_workout(str(schedule_id))
+    except Exception as exc:
+        from garmin_mcp.garmin.cffi_source import _translate
+
+        raise _translate(exc) from exc
+    log.info("workout.unscheduled", schedule_id=schedule_id)
+
+
 def create_workout(
     spec: WorkoutSpec,
     settings: Settings | None = None,

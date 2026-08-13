@@ -6,7 +6,7 @@
 
 Ask questions about your Garmin training history in plain language, from
 Claude — and send structured sessions back to your watch. Raw FIT files in,
-DuckDB out, thirteen typed MCP tools on top.
+DuckDB out, fifteen typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -64,7 +64,7 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │  13 typed tools, no     │
+              │  15 typed tools, no     │
               │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
@@ -141,7 +141,9 @@ uv run garmin-mcp sync --limit 50
 | `list_workouts` | Saved sessions in your Garmin library, with their ids | 20 by default, 100 max |
 | `create_workout` | Put a structured session on your Garmin account | off by default, two-step |
 | `delete_workout` | Undo the above | off by default, two-step |
+| `list_scheduled_workouts` | What is planned this month, with both ids | one month |
 | `schedule_workout` | Put a saved session on a date in your calendar | off by default, two-step |
+| `unschedule_workout` | Drop a planned session, keeping the workout | off by default, two-step |
 | `set_activity_notes` | Write an analysis into an activity's Notes field | off by default, two-step |
 
 ## Design decisions
@@ -312,8 +314,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 196 tests, hermetic — no data, no network
-make test-all    # 240 tests, adds validation against real recordings
+make test        # 199 tests, hermetic — no data, no network
+make test-all    # 243 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so

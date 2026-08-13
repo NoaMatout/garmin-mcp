@@ -463,3 +463,63 @@ class TestScheduleAndNotes:
         monkeypatch.setattr(tools, "_settings", lambda: enabled)
         with pytest.raises(ValueError, match="cannot be empty"):
             tools.set_activity_notes(1, "   ", confirm=True)
+
+
+class TestCalendarVisibility:
+    """Seeing the library is not the same as seeing the plan.
+
+    Without a way to read the calendar, "delete next week's runs" becomes
+    matching on names — which is how the wrong session gets deleted. Observed
+    in real use: the assistant asked four times which workouts were planned,
+    because it could not see.
+    """
+
+    def test_scheduled_entries_expose_both_ids(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A calendar entry and the session it points at are different things.
+
+        Removing a session from the calendar needs the schedule_id; deleting
+        the session itself needs the workout_id. Confusing them deletes a
+        workout the athlete meant to keep.
+        """
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda *_a, **_k: {
+                "scheduled": [
+                    {
+                        "schedule_id": 111,
+                        "workout_id": 222,
+                        "date": "2026-08-17",
+                        "name": "Monday",
+                    }
+                ]
+            },
+        )
+        entry = tools.list_scheduled_workouts("2026-08-17")["scheduled"][0]
+        assert entry["schedule_id"] != entry["workout_id"]
+
+    def test_the_month_is_taken_from_any_date_in_it(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda payload, *_a, **_k: seen.append(payload) or {"scheduled": []},
+        )
+        tools.list_scheduled_workouts("2026-08-21")
+        assert seen[0]["year"] == 2026
+        assert seen[0]["month"] == 8  # 1-based, as the live API expects
+
+    def test_unscheduling_says_the_workout_survives(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The distinction the athlete cares about: dropping a planned session
+        # is not the same as throwing the session away.
+        enabled = settings.model_copy(update={"enable_writes": True})
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        result = tools.unschedule_workout(111)
+        assert result["unscheduled"] is False
+        assert "stays in the library" in result["note"]
