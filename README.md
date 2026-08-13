@@ -271,8 +271,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 133 tests, hermetic — no data, no network
-make test-all    # 177 tests, adds validation against real recordings
+make test        # 136 tests, hermetic — no data, no network
+make test-all    # 180 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so

@@ -312,8 +312,7 @@ def weekly_summary(conn: duckdb.DuckDBPyConnection, week_start: date) -> list[di
                coalesce(sum(total_timer_time_s), 0)      AS moving_time_s,
                coalesce(sum(total_ascent_m), 0)          AS ascent_m,
                coalesce(sum(total_calories), 0)          AS calories,
-               avg(avg_heart_rate)                       AS avg_heart_rate,
-               sum(aerobic_training_effect)              AS training_load
+               avg(avg_heart_rate)                       AS avg_heart_rate
         FROM v_activity_summary
         WHERE parent_activity_id IS NULL
           AND start_time_local >= ?

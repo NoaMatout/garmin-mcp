@@ -380,3 +380,31 @@ class TestTrueRange:
         result = tools.get_activity_streams(run_id, ["lat", "lon", "heart_rate"], max_points=5)
         assert "lat" not in result["true_range"]
         assert "heart_rate" in result["true_range"]
+
+
+class TestWeeklyHonesty:
+    """A training log is where an invented number does the most damage."""
+
+    def test_no_fabricated_load_metric_is_reported(self, loaded: Settings) -> None:
+        """Training Effect is a 1-to-5 score for one session, not an additive
+        quantity. Summing it across a week yields something that reads as
+        authoritative and means nothing, so it is not reported at all.
+        """
+        summary = tools.weekly_summary("2026-03-16")
+        assert "training_load" not in summary["totals"]
+        assert all("training_load" not in entry for entry in summary["by_sport"])
+
+    def test_zero_distance_is_omitted_not_shown(self, loaded: Settings) -> None:
+        # Same rule the per-activity formatter applies; they disagreed until
+        # real data made it visible.
+        summary = tools.weekly_summary("2026-03-16")
+        for entry in summary["by_sport"] + [summary["totals"]]:
+            assert entry.get("distance_km") != 0
+            assert entry.get("ascent_m") != 0
+
+    def test_volume_metrics_survive(self, loaded: Settings) -> None:
+        # Dropping noise must not drop the numbers that matter.
+        totals = tools.weekly_summary("2026-03-16")["totals"]
+        assert totals["activities"] > 0
+        assert totals["moving_time"]
+        assert totals["distance_km"] > 0

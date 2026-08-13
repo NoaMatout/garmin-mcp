@@ -126,17 +126,27 @@ def summarize_lap(lap: dict[str, Any], sport: str | None) -> dict[str, Any]:
 
 
 def summarize_week(rows: list[dict[str, Any]], week_start: date) -> dict[str, Any]:
-    """Per-sport totals plus a combined line."""
+    """Per-sport volume for one week, plus a combined line.
+
+    Volume only — time, distance, ascent. Garmin's Training Effect is a 1-to-5
+    score describing one session; adding those up across a week produces a
+    number that looks authoritative and means nothing, and a training log is
+    exactly where a fabricated metric does damage, because it reads as an
+    answer.
+
+    Zero distance is dropped rather than shown. A strength session has no
+    distance, and `0.0 km` is noise that invites commentary on data nobody
+    asked about — the same rule the per-activity formatter already applies.
+    """
     by_sport = [
         _compact(
             {
                 "sport": row.get("sport"),
                 "activities": row.get("activities"),
-                "distance_km": _round(row.get("distance_km"), 1),
+                "distance_km": _round(row.get("distance_km"), 1) or None,
                 "moving_time": format_duration(row.get("moving_time_s")),
-                "ascent_m": _round(row.get("ascent_m"), 0),
+                "ascent_m": _round(row.get("ascent_m"), 0) or None,
                 "avg_hr": _round(row.get("avg_heart_rate"), 0),
-                "training_load": _round(row.get("training_load"), 1),
             }
         )
         for row in rows
@@ -149,10 +159,9 @@ def summarize_week(rows: list[dict[str, Any]], week_start: date) -> dict[str, An
             "totals": _compact(
                 {
                     "activities": sum(r.get("activities") or 0 for r in rows),
-                    "distance_km": _round(sum(r.get("distance_km") or 0 for r in rows), 1),
+                    "distance_km": _round(sum(r.get("distance_km") or 0 for r in rows), 1) or None,
                     "moving_time": format_duration(sum(r.get("moving_time_s") or 0 for r in rows)),
-                    "ascent_m": _round(sum(r.get("ascent_m") or 0 for r in rows), 0),
-                    "training_load": _round(sum(r.get("training_load") or 0 for r in rows), 1),
+                    "ascent_m": _round(sum(r.get("ascent_m") or 0 for r in rows), 0) or None,
                 }
             ),
             "by_sport": by_sport,
