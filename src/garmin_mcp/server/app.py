@@ -69,10 +69,12 @@ def create_server() -> MCPServer:
         tools.compare_activities,
         tools.database_status,
         tools.sync_now,
+        tools.create_workout,
+        tools.delete_workout,
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=7)
+    log.info("server.created", tools=9)
     return mcp
 
 
@@ -86,6 +88,8 @@ def tool_names() -> list[str]:
         "compare_activities",
         "database_status",
         "sync_now",
+        "create_workout",
+        "delete_workout",
     ]
 
 

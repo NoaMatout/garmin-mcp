@@ -38,7 +38,12 @@ from typing import Any
 
 from garmin_mcp.config import Settings, get_settings
 from garmin_mcp.db.migrations import init_database
-from garmin_mcp.errors import GarminAuthError, GarminError, WorkerUnavailableError
+from garmin_mcp.errors import (
+    GarminAuthError,
+    GarminError,
+    GarminMcpError,
+    WorkerUnavailableError,
+)
 from garmin_mcp.ingest.pipeline import IngestReport, import_inbox, sync_from_garmin
 from garmin_mcp.logging import get_logger
 
@@ -47,6 +52,12 @@ log = get_logger(__name__)
 HEARTBEAT_FILENAME = "worker.alive"
 REQUEST_SUFFIX = ".request.json"
 RESULT_SUFFIX = ".result.json"
+
+# Request kinds the worker answers. Both travel the same way; only the
+# handler differs. Writing is routed here rather than done in the MCP
+# server because the worker already holds the only credentialed session.
+KIND_SYNC = "sync"
+KIND_WORKOUT = "workout"
 
 # How often the loop wakes to look for a trigger. Short enough that `sync_now`
 # feels immediate, long enough to be invisible in a `top` listing.
@@ -128,13 +139,14 @@ def read_worker_status(settings: Settings | None = None) -> WorkerStatus:
 # ─── requesting a sync from another process ───────────────────────────
 
 
-def request_sync(
+def request(
+    kind: str,
+    payload: dict[str, Any],
     settings: Settings | None = None,
     *,
-    limit: int | None = None,
     timeout_s: float = 120.0,
 ) -> dict[str, Any]:
-    """Ask the worker to sync, and wait for its answer.
+    """Hand the worker a job and wait for its answer.
 
     Raises `WorkerUnavailableError` when no worker is listening, rather than
     silently leaving a request file for one that may never start.
@@ -147,21 +159,21 @@ def request_sync(
         raise WorkerUnavailableError(f"no ingest worker is running ({status.detail})")
 
     request_id = uuid.uuid4().hex[:12]
-    request_path = settings.trigger_dir / f"sync-{request_id}{REQUEST_SUFFIX}"
-    result_path = settings.trigger_dir / f"sync-{request_id}{RESULT_SUFFIX}"
+    request_path = settings.trigger_dir / f"{kind}-{request_id}{REQUEST_SUFFIX}"
+    result_path = settings.trigger_dir / f"{kind}-{request_id}{RESULT_SUFFIX}"
 
     _write_atomic(
         request_path,
-        {"requested_at": datetime.now(UTC).isoformat(), "limit": limit},
+        {"requested_at": datetime.now(UTC).isoformat(), **payload},
     )
-    log.info("sync_now.requested", request_id=request_id, limit=limit)
+    log.info("worker.request_sent", kind=kind, request_id=request_id)
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if result_path.exists():
             result = _read_json(result_path) or {}
             result_path.unlink(missing_ok=True)
-            log.info("sync_now.completed", request_id=request_id)
+            log.info("worker.request_completed", kind=kind, request_id=request_id)
             return result
         time.sleep(0.25)
 
@@ -169,6 +181,26 @@ def request_sync(
     raise WorkerUnavailableError(
         f"the worker did not answer within {timeout_s:.0f}s — it may be busy with a long sync"
     )
+
+
+def request_sync(
+    settings: Settings | None = None,
+    *,
+    limit: int | None = None,
+    timeout_s: float = 120.0,
+) -> dict[str, Any]:
+    """Ask the worker to pull new activities."""
+    return request(KIND_SYNC, {"limit": limit}, settings, timeout_s=timeout_s)
+
+
+def request_workout(
+    spec_payload: dict[str, Any],
+    settings: Settings | None = None,
+    *,
+    timeout_s: float = 60.0,
+) -> dict[str, Any]:
+    """Ask the worker to create a workout on the athlete's Garmin account."""
+    return request(KIND_WORKOUT, {"spec": spec_payload}, settings, timeout_s=timeout_s)
 
 
 # ─── the worker itself ────────────────────────────────────────────────
@@ -286,24 +318,61 @@ class IngestWorker:
     # ─── trigger files ────────────────────────────────────────────────
 
     def _pending_requests(self) -> list[Path]:
-        return sorted(self.settings.trigger_dir.glob(f"sync-*{REQUEST_SUFFIX}"))
+        requests: list[Path] = []
+        for kind in (KIND_SYNC, KIND_WORKOUT):
+            requests += self.settings.trigger_dir.glob(f"{kind}-*{REQUEST_SUFFIX}")
+        return sorted(requests)
 
     def _serve_requests(self) -> None:
         for request_path in self._pending_requests():
             payload = _read_json(request_path) or {}
             request_path.unlink(missing_ok=True)
 
-            request_id = request_path.name[len("sync-") : -len(REQUEST_SUFFIX)]
-            log.info("worker.serving_request", request_id=request_id)
+            kind, _, remainder = request_path.name.partition("-")
+            request_id = remainder[: -len(REQUEST_SUFFIX)]
+            log.info("worker.serving_request", kind=kind, request_id=request_id)
 
-            result = self._run_cycle(limit=payload.get("limit"))
-            self._last_sync = datetime.now(UTC)
+            if kind == KIND_WORKOUT:
+                result = self._create_workout(payload.get("spec") or {})
+            else:
+                result = self._run_cycle(limit=payload.get("limit"))
+                self._last_sync = datetime.now(UTC)
 
             _write_atomic(
-                self.settings.trigger_dir / f"sync-{request_id}{RESULT_SUFFIX}",
+                self.settings.trigger_dir / f"{kind}-{request_id}{RESULT_SUFFIX}",
                 result,
             )
             self._heartbeat()
+
+    def _create_workout(self, spec_payload: dict[str, Any]) -> dict[str, Any]:
+        """Build and upload a session, reporting failure as data.
+
+        Runs here rather than in the MCP server because the worker already
+        holds the only credentialed session — and because keeping every write
+        in one process is what the single-writer design is for.
+        """
+        from garmin_mcp.garmin.workout_writer import create_workout
+        from garmin_mcp.garmin.workouts import spec_from_dict
+
+        try:
+            spec = spec_from_dict(spec_payload)
+            created = create_workout(spec, self.settings)
+        except GarminMcpError as exc:
+            log.warning("worker.workout_failed", error=str(exc))
+            return {
+                "finished_at": datetime.now(UTC).isoformat(),
+                "error": exc.message,
+                "hint": exc.hint,
+            }
+        except Exception as exc:
+            log.exception("worker.workout_failed")
+            return {"finished_at": datetime.now(UTC).isoformat(), "error": str(exc)}
+
+        return {
+            "finished_at": datetime.now(UTC).isoformat(),
+            "created": created.as_dict(),
+            "structure": spec.describe(),
+        }
 
     def _expire_stale_requests(self) -> None:
         """Discard requests whose caller has long since given up."""

@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=30, ge=1)
     sync_batch_size: int = Field(default=25, ge=1, le=200)
 
+    # ─── Writing back to Garmin ───────────────────────────────────────
+    # Off by default. Reading someone's history and modifying their account
+    # are different things, and cloning this repository should not hand a
+    # language model the second one by accident.
+    enable_writes: bool = False
+
     # ─── MCP server ───────────────────────────────────────────────────
     mcp_transport: Transport = Transport.STDIO
     mcp_host: str = "127.0.0.1"

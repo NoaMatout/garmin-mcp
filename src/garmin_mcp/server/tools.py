@@ -21,7 +21,7 @@ from typing import Any
 from garmin_mcp.config import Settings, get_settings
 from garmin_mcp.db import queries
 from garmin_mcp.db.connection import reading
-from garmin_mcp.errors import ActivityNotFoundError, DatabaseLockedError
+from garmin_mcp.errors import ActivityNotFoundError, DatabaseLockedError, GarminMcpError
 from garmin_mcp.logging import get_logger
 from garmin_mcp.server import formatters
 
@@ -354,3 +354,137 @@ def sync_now(limit: int | None = None) -> dict[str, Any]:
 
     log.info("tool.sync_now", new=summary.get("new_activities"))
     return summary
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Writing back to Garmin.
+#
+# Everything above reads. These two modify the athlete's account, and are
+# built to a different standard: disabled unless explicitly switched on,
+# never acting on a single call, and undoable.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def create_workout(
+    name: str,
+    blocks: list[dict[str, Any]],
+    sport: str = "running",
+    description: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create a structured workout in the athlete's Garmin library.
+
+    Args:
+        name: What the session is called, e.g. "Threshold 4x2km".
+        blocks: The session, in order. A block is either a step or a repeat.
+            Step: {"kind": "warmup"|"interval"|"recovery"|"cooldown"|"rest",
+                   "duration_s": 1200}  or  {"distance_m": 2000},
+                   optionally "target_pace": "3:55" and "pace_tolerance_s": 5.
+                   Exactly one of duration_s or distance_m per step.
+            Repeat: {"times": 4, "steps": [ ...steps... ]}
+        sport: running, cycling or swimming.
+        description: Optional note attached to the workout.
+        confirm: Must be true to actually create it.
+
+    **Call this without `confirm` first.** That returns the session written out
+    in full and creates nothing. Show it to the athlete, and only call again
+    with confirm=true once they have agreed — this puts a real workout on their
+    Garmin account and onto their watch, and they should see it before that
+    happens rather than after.
+
+    Example blocks for "20 min easy, then 12 x 1 min at 3:45 with 1 min float":
+        [{"kind": "warmup", "duration_s": 1200},
+         {"times": 12, "steps": [
+             {"kind": "interval", "duration_s": 60, "target_pace": "3:45"},
+             {"kind": "recovery", "duration_s": 60}]},
+         {"kind": "cooldown", "duration_s": 600}]
+    """
+    from garmin_mcp.garmin.workouts import WorkoutSpecError, spec_from_dict
+    from garmin_mcp.ingest.worker import request_workout
+
+    settings = _settings()
+
+    # Fail before building anything if writing is switched off, so the reason
+    # is the actual one rather than a confusing downstream error.
+    if not settings.enable_writes:
+        return {
+            "created": False,
+            "error": "writing to Garmin is disabled on this installation",
+            "fix": "set GARMIN_ENABLE_WRITES=true in .env and restart the ingest worker",
+        }
+
+    try:
+        spec = spec_from_dict(
+            {"name": name, "blocks": blocks, "sport": sport, "description": description}
+        )
+        spec.validate()
+    except WorkoutSpecError as exc:
+        raise ValueError(str(exc)) from exc
+
+    if not confirm:
+        # Nothing has left the machine at this point: the spec was built and
+        # validated locally, with no credential involved.
+        return {
+            "created": False,
+            "preview": spec.summary(),
+            "next_step": (
+                "show this session to the athlete; if they agree, call "
+                "create_workout again with the same arguments and confirm=true"
+            ),
+        }
+
+    result = request_workout(
+        {"name": name, "blocks": blocks, "sport": sport, "description": description},
+        settings,
+    )
+
+    if result.get("error"):
+        return {"created": False, "error": result["error"], "fix": result.get("hint")}
+
+    created = result.get("created", {})
+    log.info("tool.create_workout", workout_id=created.get("workout_id"))
+    return {
+        "created": True,
+        **created,
+        "structure": result.get("structure"),
+        "note": (
+            "the workout is in the Garmin library and will sync to the watch; "
+            "it is not scheduled on any date"
+        ),
+    }
+
+
+def delete_workout(workout_id: int, confirm: bool = False) -> dict[str, Any]:
+    """Remove a workout from the athlete's Garmin library.
+
+    Args:
+        workout_id: The id returned by create_workout.
+        confirm: Must be true to actually delete.
+
+    The undo for create_workout. Same two-step rule: without confirm it
+    reports what would be removed and does nothing.
+    """
+    from garmin_mcp.garmin.workout_writer import delete_workout as do_delete
+
+    settings = _settings()
+    if not settings.enable_writes:
+        return {
+            "deleted": False,
+            "error": "writing to Garmin is disabled on this installation",
+        }
+
+    workout_id = int(workout_id)
+    if not confirm:
+        return {
+            "deleted": False,
+            "would_delete": workout_id,
+            "next_step": "call again with confirm=true to remove it",
+        }
+
+    try:
+        do_delete(workout_id, settings)
+    except GarminMcpError as exc:
+        return {"deleted": False, "error": exc.message, "fix": exc.hint}
+
+    log.info("tool.delete_workout", workout_id=workout_id)
+    return {"deleted": True, "workout_id": workout_id}

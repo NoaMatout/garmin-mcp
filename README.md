@@ -133,6 +133,8 @@ uv run garmin-mcp sync --limit 50
 | `compare_activities` | Two activities with deltas computed | fixed |
 | `database_status` | What is stored, worker health, reachability | fixed |
 | `sync_now` | Pull new activities without leaving the chat | needs the worker |
+| `create_workout` | Put a structured session on your Garmin account | off by default, two-step |
+| `delete_workout` | Undo the above | off by default, two-step |
 
 ## Design decisions
 
@@ -271,8 +273,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 136 tests, hermetic — no data, no network
-make test-all    # 180 tests, adds validation against real recordings
+make test        # 166 tests, hermetic — no data, no network
+make test-all    # 210 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so
