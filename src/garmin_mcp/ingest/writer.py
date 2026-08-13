@@ -93,6 +93,21 @@ _LAP_COLUMNS = (
     "total_calories",
     "intensity",
     "lap_trigger",
+    "wkt_step_index",
+)
+
+_PLANNED_STEP_COLUMNS = (
+    "activity_id",
+    "step_index",
+    "workout_name",
+    "intensity",
+    "duration_type",
+    "duration_value",
+    "target_type",
+    "target_low",
+    "target_high",
+    "repeat_from_step",
+    "repeat_count",
 )
 
 _RECORD_COLUMNS = (
@@ -209,8 +224,28 @@ def _lap_rows(activity: Activity) -> list[tuple[Any, ...]]:
             lap.total_calories,
             lap.intensity,
             lap.lap_trigger,
+            lap.wkt_step_index,
         )
         for lap in activity.laps
+    ]
+
+
+def _planned_step_rows(activity: Activity) -> list[tuple[Any, ...]]:
+    return [
+        (
+            activity.activity_id,
+            step.step_index,
+            step.name,
+            step.intensity,
+            step.duration_type,
+            step.duration_value,
+            step.target_type,
+            step.target_low,
+            step.target_high,
+            step.repeat_from_step,
+            step.repeat_count,
+        )
+        for step in activity.planned_steps
     ]
 
 
@@ -347,7 +382,7 @@ def write_parsed(
         # Replace rather than merge. Children are removed too: a re-parse may
         # split a file into a different number of sessions, and stale legs
         # pointing at a vanished parent would silently distort every total.
-        for table in ("records", "laps", "activities"):
+        for table in ("records", "laps", "workout_steps", "activities"):
             conn.execute(
                 f"DELETE FROM {table} WHERE activity_id IN ({', '.join('?' * len(activity_ids))})",
                 activity_ids,
@@ -370,6 +405,14 @@ def write_parsed(
                 f"INSERT INTO laps ({', '.join(_LAP_COLUMNS)}) "
                 f"VALUES ({_placeholders(_LAP_COLUMNS)})",
                 lap_rows,
+            )
+
+        planned_rows = [row for a in parsed.activities for row in _planned_step_rows(a)]
+        if planned_rows:
+            conn.executemany(
+                f"INSERT INTO workout_steps ({', '.join(_PLANNED_STEP_COLUMNS)}) "
+                f"VALUES ({_placeholders(_PLANNED_STEP_COLUMNS)})",
+                planned_rows,
             )
 
         record_rows = [row for a in parsed.activities for row in _record_rows(a)]

@@ -308,3 +308,65 @@ def _watermark(conn: duckdb.DuckDBPyConnection) -> date | None:
     """
     latest = queries.latest_garmin_start(conn)
     return latest.date() if latest else None
+
+
+def reparse_stored(
+    settings: Settings | None = None,
+    *,
+    force: bool = False,
+) -> IngestReport:
+    """Re-parse every FIT file kept under data/raw/.
+
+    This is what keeping the raw files is for. When the parser learns to read
+    a field it previously ignored, the whole history can be brought up to date
+    without asking Garmin for anything — no network, no credentials, no rate
+    limits, and it works just as well on an account that no longer
+    authenticates.
+
+    Files already parsed by the current parser version are skipped unless
+    `force`, so running it twice costs one hash per file.
+    """
+    settings = settings or get_settings()
+    settings.ensure_dirs()
+
+    files = sorted(settings.raw_dir.rglob("*.fit"))
+    report = IngestReport()
+    if not files:
+        log.info("reparse.nothing_stored", path=str(settings.raw_dir))
+        return report
+
+    log.info("reparse.starting", files=len(files), parser_version=PARSER_VERSION)
+    for path in files:
+        # Each file gets its own short write window: the MCP server cannot
+        # read while the database is held, and a full history takes minutes.
+        with writing(settings) as conn:
+            report.outcomes.append(
+                ingest_bytes(
+                    conn,
+                    path.read_bytes(),
+                    origin=path.name,
+                    # Provenance is already recorded; re-parsing must not
+                    # relabel a Garmin download as a manual import.
+                    source=_stored_source(conn, path),
+                    garmin_activity_id=_garmin_id_from_name(path),
+                    settings=settings,
+                    force=force,
+                )
+            )
+
+    log.info("reparse.done", summary=report.summary())
+    return report
+
+
+def _stored_source(conn: duckdb.DuckDBPyConnection, path: Path) -> Source:
+    row = conn.execute(
+        "SELECT source FROM files WHERE path = ? OR path LIKE ?",
+        [str(path), f"%{path.name}"],
+    ).fetchone()
+    return "garmin" if row and row[0] == "garmin" else "manual"
+
+
+def _garmin_id_from_name(path: Path) -> int | None:
+    """Raw files downloaded from Garmin are named after their activity id."""
+    stem = path.stem
+    return int(stem) if stem.isdigit() and int(stem) < 2**62 else None

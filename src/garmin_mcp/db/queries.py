@@ -387,3 +387,46 @@ def stream_extrema(
                 key: round(float(value), 2) for key, value in stats.items() if value is not None
             }
     return extrema
+
+
+def get_planned_steps(conn: duckdb.DuckDBPyConnection, activity_id: int) -> list[dict[str, Any]]:
+    """The structured workout this activity was run from, if any."""
+    result = conn.execute(
+        """
+        SELECT step_index, workout_name, intensity, duration_type, duration_value,
+               target_type, target_low, target_high, repeat_from_step, repeat_count
+        FROM workout_steps WHERE activity_id = ?
+        ORDER BY step_index
+        """,
+        [activity_id],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def get_laps_by_step(
+    conn: duckdb.DuckDBPyConnection, activity_id: int
+) -> dict[int, list[dict[str, Any]]]:
+    """Laps grouped by the prescribed step they belong to.
+
+    The grouping key comes from the watch, not from us, so a lap is attributed
+    to the step the athlete was actually running — including when they pressed
+    lap mid-interval.
+    """
+    result = conn.execute(
+        """
+        SELECT wkt_step_index, lap_index, total_timer_time_s, total_distance_m,
+               avg_speed_mps, avg_heart_rate, max_heart_rate, avg_cadence,
+               avg_power_w, intensity
+        FROM laps
+        WHERE activity_id = ? AND wkt_step_index IS NOT NULL
+        ORDER BY lap_index
+        """,
+        [activity_id],
+    )
+    columns = [d[0] for d in result.description]
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in result.fetchall():
+        entry = dict(zip(columns, row, strict=True))
+        grouped.setdefault(int(entry["wkt_step_index"]), []).append(entry)
+    return grouped

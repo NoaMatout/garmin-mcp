@@ -110,7 +110,30 @@ CREATE TABLE IF NOT EXISTS laps (
     total_calories     INTEGER,
     intensity          VARCHAR,   -- active | rest | warmup | cooldown
     lap_trigger        VARCHAR,
+    -- Which prescribed step this lap belongs to, written by the watch when the
+    -- session was run from a structured workout. Exact, so comparing what was
+    -- asked against what happened needs no guesswork.
+    wkt_step_index     INTEGER,
     PRIMARY KEY (activity_id, lap_index)
+);
+
+-- ─── The prescription ─────────────────────────────────────────────────
+-- Present only for sessions started from a structured workout on the watch.
+-- The plan travels inside the FIT file itself, so intent and execution can be
+-- compared without linking anything back to a Garmin workout id.
+CREATE TABLE IF NOT EXISTS workout_steps (
+    activity_id      BIGINT  NOT NULL,
+    step_index       INTEGER NOT NULL,
+    workout_name     VARCHAR,
+    intensity        VARCHAR,   -- warmup | active | recovery | cooldown | rest
+    duration_type    VARCHAR,   -- time | distance | open | repeat_until_steps_cmplt
+    duration_value   DOUBLE,    -- seconds or metres, per duration_type
+    target_type      VARCHAR,   -- NULL when the step was left open (no alerts)
+    target_low       DOUBLE,
+    target_high      DOUBLE,
+    repeat_from_step INTEGER,
+    repeat_count     INTEGER,
+    PRIMARY KEY (activity_id, step_index)
 );
 
 -- ─── Records ──────────────────────────────────────────────────────────

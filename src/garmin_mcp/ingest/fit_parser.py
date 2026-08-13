@@ -39,6 +39,7 @@ from garmin_mcp.domain.models import (
     Activity,
     Lap,
     ParsedFit,
+    PlannedStep,
     Record,
     Source,
     synthetic_activity_id,
@@ -217,6 +218,9 @@ class _RawFit:
         self.sessions: list[fitdecode.FitDataMessage] = []
         self.laps: list[fitdecode.FitDataMessage] = []
         self.records: list[fitdecode.FitDataMessage] = []
+        # The structured workout the session was run from, when there was one.
+        self.workout: fitdecode.FitDataMessage | None = None
+        self.workout_steps: list[fitdecode.FitDataMessage] = []
         self.truncated = False
         self.truncation_reason: str | None = None
 
@@ -251,6 +255,10 @@ def _read_messages(path: Path) -> _RawFit:
                         raw.file_id = raw.file_id or frame
                     case "activity":
                         raw.activities.append(frame)
+                    case "workout":
+                        raw.workout = raw.workout or frame
+                    case "workout_step":
+                        raw.workout_steps.append(frame)
     except FileNotFoundError:
         raise
     except Exception as exc:  # fitdecode raises a family of parse errors
@@ -421,7 +429,45 @@ def _build_lap(
         total_calories=_as_int(_val(msg, "total_calories")),
         intensity=_as_str(_val(msg, "intensity")),
         lap_trigger=_as_str(_val(msg, "lap_trigger")),
+        wkt_step_index=_as_int(_val(msg, "wkt_step_index")),
     )
+
+
+def _build_planned_steps(raw: _RawFit) -> list[PlannedStep]:
+    """Read the prescription the watch was following.
+
+    Targets are stored the same way workouts are written: a speed range in
+    metres per second for a pace zone, zeroes when the step is `open`, which
+    is what an athlete who prefers no alerts ends up with.
+    """
+    steps: list[PlannedStep] = []
+    name = _as_str(_val(raw.workout, "wkt_name")) if raw.workout is not None else None
+
+    for msg in raw.workout_steps:
+        index = _as_int(_val(msg, "message_index"))
+        if index is None:
+            continue
+        duration_type = _as_str(_val(msg, "duration_type"))
+        duration = _as_float(_first(msg, "duration_time", "duration_distance", "duration_value"))
+        target_type = _as_str(_val(msg, "target_type"))
+        low = _as_float(_val(msg, "custom_target_value_low"))
+        high = _as_float(_val(msg, "custom_target_value_high"))
+
+        steps.append(
+            PlannedStep(
+                step_index=index,
+                intensity=_as_str(_val(msg, "intensity")),
+                duration_type=duration_type,
+                duration_value=duration,
+                target_type=None if target_type == "open" else target_type,
+                target_low=low or None,
+                target_high=high or None,
+                repeat_from_step=_as_int(_val(msg, "duration_step")),
+                repeat_count=_as_int(_val(msg, "repeat_steps")),
+                name=name,
+            )
+        )
+    return steps
 
 
 def _session_extra(msg: fitdecode.FitDataMessage) -> dict[str, Any]:
@@ -783,6 +829,8 @@ def parse_fit(
 
     tz_offset_seconds, tz_source = _resolve_tz_offset(raw, sessions)
 
+    planned = _build_planned_steps(raw)
+
     lap_buckets = _assign_by_window(
         [(ts, m) for m in raw.laps if (ts := _as_utc(_val(m, "start_time"))) is not None], windows
     )
@@ -824,6 +872,11 @@ def parse_fit(
         )
         if raw.truncated:
             activity.extra["_truncated"] = raw.truncation_reason
+        # The prescription belongs to the whole file; attach it to the single
+        # session, or to nothing when the file holds several.
+        if planned and len(resolved) == 1:
+            activity.planned_steps = planned
+            activity.workout_name = planned[0].name
         activities.append(activity)
 
     if is_multisport:

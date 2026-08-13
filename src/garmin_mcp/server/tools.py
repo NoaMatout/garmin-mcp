@@ -624,3 +624,44 @@ def set_activity_notes(activity_id: int, notes: str, confirm: bool = False) -> d
 
     log.info("tool.set_activity_notes", activity_id=activity_id, chars=len(text))
     return {"written": True, "activity_id": activity_id, "characters": len(text)}
+
+
+def compare_to_plan(activity_id: int) -> dict[str, Any]:
+    """Compare a completed session against the workout it was run from.
+
+    Args:
+        activity_id: The activity's id.
+
+    Only works for sessions started from a structured workout on the watch —
+    the prescription travels inside the FIT file, so the pairing between each
+    lap and the step it belongs to is recorded by the device rather than
+    guessed here.
+
+    Returns the plan step by step with what was actually done: reps prescribed
+    against reps completed, pace per rep, and the drift across a set, which a
+    single average hides — holding 3:43 throughout and fading from 3:35 to
+    3:52 average the same.
+    """
+    activity_id = int(activity_id)
+
+    with reading(_settings()) as conn:
+        activity = queries.get_activity(conn, activity_id)
+        if activity is None:
+            raise ActivityNotFoundError(activity_id)
+        steps = queries.get_planned_steps(conn, activity_id)
+        laps_by_step = queries.get_laps_by_step(conn, activity_id)
+
+    if not steps:
+        return {
+            "activity_id": activity_id,
+            "has_plan": False,
+            "note": (
+                "this session was not run from a structured workout, so there is "
+                "nothing to compare it against — use get_activity_detail for its laps"
+            ),
+        }
+
+    result = formatters.compare_to_plan(activity, steps, laps_by_step)
+    result["has_plan"] = True
+    log.info("tool.compare_to_plan", activity_id=activity_id, steps=len(steps))
+    return result

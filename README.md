@@ -6,7 +6,7 @@
 
 Ask questions about your Garmin training history in plain language, from
 Claude — and send structured sessions back to your watch. Raw FIT files in,
-DuckDB out, twelve typed MCP tools on top.
+DuckDB out, thirteen typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -64,7 +64,7 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │  12 typed tools, no     │
+              │  13 typed tools, no     │
               │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
@@ -75,7 +75,8 @@ a model can answer questions against real data instead of guessing.
 Raw FIT files are kept forever under `data/raw/`. About 150 kB per activity —
 a decade of triathlon fits in well under a gigabyte — which means the entire
 history can be re-parsed whenever the parser learns a new field, with no
-network involved.
+network involved. `garmin-mcp reparse` does exactly that, and it works on an
+account that no longer authenticates.
 
 ## Quick start
 
@@ -121,6 +122,7 @@ uv run garmin-mcp sync --limit 50
 | `import` | Ingest FIT files from `data/inbox/` — no network, no credentials |
 | `serve` | Run the MCP server |
 | `worker` | Background sync loop — the only process that writes |
+| `reparse` | Re-read every stored FIT file after a parser change — no network |
 | `status` | Report whether Garmin is currently reachable |
 | `info` | Show what the database holds |
 
@@ -133,6 +135,7 @@ uv run garmin-mcp sync --limit 50
 | `get_activity_streams` | Columnar time series + true peaks | 200 points, 2000 max |
 | `weekly_summary` | Per-sport totals for one week | one week |
 | `compare_activities` | Two activities with deltas computed | fixed |
+| `compare_to_plan` | A session against the workout it was run from | fixed |
 | `database_status` | What is stored, worker health, reachability | fixed |
 | `sync_now` | Pull new activities without leaving the chat | needs the worker |
 | `list_workouts` | Saved sessions in your Garmin library, with their ids | 20 by default, 100 max |
@@ -294,6 +297,7 @@ make test-all      # fetches the corpus, then runs the deep suite
 | `files` | One row per ingested FIT, keyed by content hash |
 | `activities` | One row per session, plus a parent row for multisport |
 | `laps` | Intervals — what makes a structured session legible |
+| `workout_steps` | The prescription, when a session came from a structured workout |
 | `records` | One sample per second: HR, pace, altitude, power, running dynamics |
 
 Wide tables rather than key/value: DuckDB is columnar, so unused columns cost
@@ -308,8 +312,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 184 tests, hermetic — no data, no network
-make test-all    # 228 tests, adds validation against real recordings
+make test        # 195 tests, hermetic — no data, no network
+make test-all    # 239 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so

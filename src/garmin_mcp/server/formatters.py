@@ -275,3 +275,179 @@ def format_streams(
             "raise max_points for finer shape."
         )
     return payload
+
+
+# ─── prescribed versus executed ───────────────────────────────────────
+
+
+def _prescription(step: dict[str, Any]) -> str:
+    """What the step asked for, in words."""
+    kind = step.get("duration_type")
+    value = step.get("duration_value") or 0
+
+    if kind == "time":
+        extent = format_duration(value)
+    elif kind == "distance":
+        extent = f"{value / 1000:g} km" if value >= 1000 else f"{value:g} m"
+    else:
+        extent = "open"
+
+    target = ""
+    low, high = step.get("target_low"), step.get("target_high")
+    if step.get("target_type") and low and high:
+        # Stored as a speed range, so the faster pace comes from the higher one.
+        target = f" at {format_pace(1000 / high)}–{format_pace(1000 / low)}"
+    return f"{extent}{target}"
+
+
+def _executed_lap(lap: dict[str, Any], sport: str | None) -> dict[str, Any]:
+    speed = lap.get("avg_speed_mps")
+    velocity: dict[str, Any] = {}
+    if speed and speed > 0:
+        velocity = (
+            {"speed_kmh": round(speed * 3.6, 1)}
+            if is_cycling(sport)
+            else {"pace": format_pace(1000.0 / speed)}
+        )
+    return _compact(
+        {
+            "duration": format_duration(lap.get("total_timer_time_s")),
+            "distance_km": _round((lap.get("total_distance_m") or 0) / 1000, 2) or None,
+            **velocity,
+            "avg_hr": lap.get("avg_heart_rate"),
+            "avg_power_w": _round(lap.get("avg_power_w"), 0),
+        }
+    )
+
+
+def _repeat_map(steps: list[dict[str, Any]]) -> dict[int, int]:
+    """How many times each step was prescribed to run.
+
+    A repeat is expressed as its own step that jumps back to an earlier index,
+    so the steps between the two are the ones repeated.
+    """
+    counts: dict[int, int] = {}
+    for step in steps:
+        if step.get("duration_type") != "repeat_until_steps_cmplt":
+            continue
+        start = int(step.get("repeat_from_step") or 0)
+        times = int(step.get("repeat_count") or 1)
+        for index in range(start, int(step["step_index"])):
+            counts[index] = times
+    return counts
+
+
+def compare_to_plan(
+    activity: dict[str, Any],
+    steps: list[dict[str, Any]],
+    laps_by_step: dict[int, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Line up what was asked against what happened, step by step.
+
+    The point is a report a coach can read: not "you ran 9 km in 47 minutes"
+    but "twelve reps prescribed, twelve completed, averaging 3:43 against a
+    3:45 target". The pairing is exact — the watch records which prescribed
+    step each lap belongs to, so nothing here is inferred.
+    """
+    sport = activity.get("sport")
+    repeats = _repeat_map(steps)
+    blocks: list[dict[str, Any]] = []
+
+    for step in steps:
+        if step.get("duration_type") == "repeat_until_steps_cmplt":
+            continue  # structural, not something the athlete runs
+
+        index = int(step["step_index"])
+        laps = laps_by_step.get(index, [])
+        planned_times = repeats.get(index)
+
+        block: dict[str, Any] = _compact(
+            {
+                "step": step.get("intensity") or f"step {index}",
+                "prescribed": _prescription(step),
+            }
+        )
+
+        if planned_times:
+            block["prescribed_reps"] = planned_times
+            block["completed_reps"] = len(laps)
+            if len(laps) != planned_times:
+                block["note"] = (
+                    f"{len(laps)} of {planned_times} completed"
+                    if len(laps) < planned_times
+                    else f"{len(laps)} recorded for {planned_times} prescribed"
+                )
+            block["reps"] = [
+                {"rep": i + 1, **_executed_lap(lap, sport)} for i, lap in enumerate(laps)
+            ]
+            block |= _rep_aggregate(laps, sport)
+        elif laps:
+            block["executed"] = _merge_laps(laps, sport)
+            if len(laps) > 1:
+                block["laps_merged"] = len(laps)
+        else:
+            block["executed"] = None
+            block["note"] = "no lap recorded for this step"
+
+        blocks.append(_compact(block))
+
+    return _compact(
+        {
+            "activity_id": activity.get("activity_id"),
+            "date": _local_date(activity.get("start_time_local")),
+            "plan": steps[0].get("workout_name") if steps else None,
+            "blocks": blocks,
+        }
+    )
+
+
+def _merge_laps(laps: list[dict[str, Any]], sport: str | None) -> dict[str, Any]:
+    """Collapse several laps into one line — auto-lap splits a warm-up."""
+    duration = sum(lap.get("total_timer_time_s") or 0 for lap in laps)
+    distance = sum(lap.get("total_distance_m") or 0 for lap in laps)
+    speed = distance / duration if duration else 0
+    heart_rates = [lap["avg_heart_rate"] for lap in laps if lap.get("avg_heart_rate")]
+
+    velocity: dict[str, Any] = {}
+    if speed > 0:
+        velocity = (
+            {"speed_kmh": round(speed * 3.6, 1)}
+            if is_cycling(sport)
+            else {"pace": format_pace(1000.0 / speed)}
+        )
+    return _compact(
+        {
+            "duration": format_duration(duration),
+            "distance_km": _round(distance / 1000, 2) or None,
+            **velocity,
+            "avg_hr": round(sum(heart_rates) / len(heart_rates)) if heart_rates else None,
+        }
+    )
+
+
+def _rep_aggregate(laps: list[dict[str, Any]], sport: str | None) -> dict[str, Any]:
+    """The numbers a coach reads first: average, spread, and drift."""
+    speeds = [lap["avg_speed_mps"] for lap in laps if lap.get("avg_speed_mps")]
+    if not speeds or is_cycling(sport):
+        return {}
+
+    paces = [1000.0 / s for s in speeds]
+    average = sum(paces) / len(paces)
+    result: dict[str, Any] = {
+        "avg_pace": format_pace(average),
+        "fastest": format_pace(min(paces)),
+        "slowest": format_pace(max(paces)),
+    }
+
+    # Drift across the set is the thing a summary average hides: holding 3:43
+    # throughout and fading from 3:35 to 3:52 average the same.
+    if len(paces) >= 4:
+        half = len(paces) // 2
+        first = sum(paces[:half]) / half
+        second = sum(paces[half:]) / (len(paces) - half)
+        drift = round(second - first)
+        result["drift_s_per_km"] = drift
+        result["drift_verdict"] = (
+            "held" if abs(drift) <= 2 else "faded" if drift > 0 else "negative split"
+        )
+    return result

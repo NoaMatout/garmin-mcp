@@ -73,6 +73,32 @@ class Record:
 
 
 @dataclass(slots=True)
+class PlannedStep:
+    """One step of the structured workout an activity was run from.
+
+    Present only when the athlete started the session from a workout on the
+    watch. It is the prescription, carried inside the FIT file itself, which
+    is what makes comparing intent against execution possible without linking
+    anything to a Garmin id.
+    """
+
+    step_index: int
+    intensity: str | None = None
+    duration_type: str | None = None  # time | distance | open | repeat_until_steps_cmplt
+    duration_value: float | None = None  # seconds or metres, per duration_type
+    target_type: str | None = None
+    target_low: float | None = None
+    target_high: float | None = None
+    repeat_from_step: int | None = None
+    repeat_count: int | None = None
+    name: str | None = None
+
+    @property
+    def is_repeat(self) -> bool:
+        return self.duration_type == "repeat_until_steps_cmplt"
+
+
+@dataclass(slots=True)
 class Lap:
     """One lap or interval within a session."""
 
@@ -96,6 +122,9 @@ class Lap:
     # readable ("8 × 400 m" rather than 17 undifferentiated laps).
     intensity: str | None = None
     lap_trigger: str | None = None
+    # Which prescribed step this lap belongs to, when the session came from a
+    # structured workout. Written by the watch, so the mapping is exact.
+    wkt_step_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -152,6 +181,8 @@ class Activity:
 
     laps: list[Lap] = field(default_factory=list)
     records: list[Record] = field(default_factory=list)
+    planned_steps: list[PlannedStep] = field(default_factory=list)
+    workout_name: str | None = None
 
     @property
     def is_multisport_parent(self) -> bool:

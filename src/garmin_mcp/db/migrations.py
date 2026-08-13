@@ -20,17 +20,29 @@ from garmin_mcp.logging import get_logger
 
 log = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Bumping this forces every stored FIT file to be re-parsed on the next sync,
 # without re-downloading. Raise it whenever fit_parser starts extracting a
 # field it previously ignored.
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+
 # Ordered post-baseline steps: {target_version: callable}. Empty at v1.
-_MIGRATIONS: dict[int, Callable[[duckdb.DuckDBPyConnection], None]] = {}
+def _v2_add_workout_step_link(conn: duckdb.DuckDBPyConnection) -> None:
+    """Link laps to the prescribed step they belong to.
+
+    The table itself is created by the baseline DDL; only this column needs an
+    ALTER, since `laps` predates it.
+    """
+    conn.execute("ALTER TABLE laps ADD COLUMN IF NOT EXISTS wkt_step_index INTEGER")
+
+
+_MIGRATIONS: dict[int, Callable[[duckdb.DuckDBPyConnection], None]] = {
+    2: _v2_add_workout_step_link,
+}
 
 
 def _current_version(conn: duckdb.DuckDBPyConnection) -> int:

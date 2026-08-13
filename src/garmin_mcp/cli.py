@@ -420,6 +420,38 @@ def worker() -> None:
 
 
 @app.command()
+def reparse(
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-parse even files already at this parser version.")
+    ] = False,
+) -> None:
+    """Re-parse every FIT file kept under data/raw/.
+
+    What keeping the raw files is for. When the parser learns to read a field
+    it previously ignored, this brings the whole history up to date without
+    asking Garmin for anything — no network, no credentials, and it works just
+    as well on an account that no longer authenticates.
+    """
+    from garmin_mcp.ingest.pipeline import reparse_stored
+
+    settings = get_settings()
+    init_database(settings)
+
+    try:
+        report = reparse_stored(settings, force=force)
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    if not report.outcomes:
+        typer.echo(f"nothing stored under {settings.raw_dir}")
+        return
+    typer.echo(report.summary())
+    if report.failed:
+        raise typer.Exit(1)
+
+
+@app.command()
 def info() -> None:
     """Show what is currently in the database."""
     settings = get_settings()

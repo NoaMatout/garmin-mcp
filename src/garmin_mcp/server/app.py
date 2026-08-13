@@ -67,6 +67,7 @@ def create_server() -> MCPServer:
         tools.get_activity_streams,
         tools.weekly_summary,
         tools.compare_activities,
+        tools.compare_to_plan,
         tools.database_status,
         tools.sync_now,
         tools.list_workouts,
@@ -77,7 +78,7 @@ def create_server() -> MCPServer:
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=12)
+    log.info("server.created", tools=13)
     return mcp
 
 
@@ -89,6 +90,7 @@ def tool_names() -> list[str]:
         "get_activity_streams",
         "weekly_summary",
         "compare_activities",
+        "compare_to_plan",
         "database_status",
         "sync_now",
         "list_workouts",
