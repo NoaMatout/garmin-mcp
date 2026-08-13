@@ -5,7 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Ask questions about your Garmin training history in plain language, from
-Claude. Raw FIT files in, DuckDB out, five typed MCP tools on top.
+Claude — and send structured sessions back to your watch. Raw FIT files in,
+DuckDB out, ten typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -63,8 +64,8 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │   5 typed tools, no     │
-              │   generic SQL           │
+              │  10 typed tools, no     │
+              │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
                            ▼
@@ -114,6 +115,7 @@ uv run garmin-mcp sync --limit 50
 | Command | Purpose |
 |---|---|
 | `setup` | Interactive first run — credentials, database, login, verification |
+| `init-db` | Create the database and apply the schema (setup does this for you) |
 | `auth` | Log in to Garmin and save the session (the only command that sees a password) |
 | `sync` | Download and ingest new activities, incrementally |
 | `import` | Ingest FIT files from `data/inbox/` — no network, no credentials |
@@ -220,6 +222,36 @@ channel. Because averaging flattens extremes, every stream response also carries
 `true_range`: minimum, maximum and mean computed over every raw sample. Without
 it, a coarse 10-point overview of a real ride reports a maximum heart rate of
 160 against an actual 174, and states it with complete confidence.
+
+### Writing is held to a different standard than reading
+
+Reading someone's training history and modifying their account are different
+acts, and the second one arrives on a wrist. Three tools can write —
+`create_workout`, `delete_workout` and the listing that makes them usable —
+and they are built accordingly.
+
+**Off by default.** `GARMIN_ENABLE_WRITES=false`. Cloning a repository must not
+hand a language model the ability to change someone's Garmin account.
+
+**Never on a single call.** The first call to `create_workout` validates the
+session locally, sends nothing, and returns it written out in full. Only a
+second call carrying `confirm=true` creates it. Nothing leaves the machine
+during the preview — no credential is even loaded — which is what makes the
+confirmation real rather than ceremonial.
+
+**Reachable undo.** `delete_workout` takes an id, and `list_workouts` is what
+makes ids discoverable. Without it the undo existed only for whoever still had
+the conversation that created the workout, which is not an undo.
+
+**Not scheduled, not pushed.** A created workout lands in the library and syncs
+to the watch from there. Putting it on a date, or pushing it to a device, stay
+out of scope: a suggestion appearing on tomorrow's calendar unasked is a
+different thing from one sitting in a list.
+
+**Still no credentials in the server.** Every call that needs an authenticated
+session — including reading the workout library — goes through the ingest
+worker. The MCP server cannot authenticate, which is what keeps a dead Garmin
+session degrading into stale history rather than a broken server.
 
 ## Device compatibility
 
@@ -344,7 +376,15 @@ GARMIN_EMAIL=
 GARMIN_PASSWORD=
 ```
 
-Everything else in [`.env.example`](.env.example) already has a working default.
+One more is worth knowing about:
+
+```
+GARMIN_ENABLE_WRITES=false
+```
+
+Off by default. It gates the three tools that touch your Garmin account rather
+than just reading it. Everything else in [`.env.example`](.env.example) already
+has a working default.
 
 ## Privacy
 
@@ -358,6 +398,9 @@ traces start where you live.
 - The MCP server has no authentication of its own. Under stdio that is fine —
   only the client that launched it can talk to it. If you switch to streamable
   HTTP, keep it bound to localhost.
+- The server holds no Garmin credentials at all, not even for reading your
+  workout library. Every call that needs a session goes through the ingest
+  worker.
 
 ## Limitations
 
@@ -370,6 +413,10 @@ traces start where you live.
   ingested. The schema leaves room for them.
 - **One user per database.** Multi-tenancy would be one database file per user
   rather than a `user_id` column.
+- **Writing covers workouts, nothing else.** Creating and deleting sessions in
+  your library, and that is all. Scheduling one on a date, pushing it to a
+  device, and editing an existing session are not exposed, though the library
+  supports them.
 
 ## License
 
