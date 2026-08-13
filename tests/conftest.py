@@ -6,6 +6,7 @@ the suite never touches the developer's real database or activities.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -16,9 +17,21 @@ from tests import fit_builder
 
 
 @pytest.fixture
-def settings(tmp_path: Path) -> Iterator[Settings]:
-    """Settings pointing at an isolated temporary data tree."""
+def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
+    """Settings pointing at an isolated temporary data tree.
+
+    Both the developer's `.env` and any GARMIN_* variables already in the
+    environment are ignored. Without that the suite quietly inherits whatever
+    the machine happens to be configured for — a real occurrence: enabling
+    Garmin writes locally broke the test asserting they are off by default,
+    which CI could never have reproduced.
+    """
+    for name in list(os.environ):
+        if name.startswith("GARMIN_"):
+            monkeypatch.delenv(name, raising=False)
+
     cfg = Settings(
+        _env_file=None,  # type: ignore[call-arg]
         data_dir=tmp_path / "data",
         db_path=tmp_path / "data" / "garmin.duckdb",
         token_dir=tmp_path / "data" / ".tokens",

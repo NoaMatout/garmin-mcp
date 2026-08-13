@@ -102,6 +102,9 @@ class WorkerStatus:
     updated_at: datetime | None = None
     last_sync: str | None = None
     detail: str | None = None
+    # Request kinds this worker understands. Absent on builds predating the
+    # field, which is itself the signal that it is an older one.
+    supports: tuple[str, ...] = ()
 
     @property
     def age_seconds(self) -> float | None:
@@ -133,6 +136,7 @@ def read_worker_status(settings: Settings | None = None) -> WorkerStatus:
         updated_at=updated,
         last_sync=payload.get("last_sync"),
         detail=None if age <= HEARTBEAT_STALE_SECONDS else f"heartbeat is {age:.0f}s old",
+        supports=tuple(payload.get("supports") or ()),
     )
 
 
@@ -157,6 +161,21 @@ def request(
     status = read_worker_status(settings)
     if not status.alive:
         raise WorkerUnavailableError(f"no ingest worker is running ({status.detail})")
+
+    # A worker from an older build silently ignores request kinds it does not
+    # know, and the caller then waits out its whole timeout before reporting
+    # something misleading like "the worker may be busy". Checking first turns
+    # a version mismatch into the one sentence that actually helps.
+    if status.supports and kind not in status.supports:
+        raise WorkerUnavailableError(
+            f"the running worker does not handle {kind!r} requests "
+            f"(it supports: {', '.join(status.supports) or 'sync only'})"
+        )
+    if not status.supports and kind != KIND_SYNC:
+        raise WorkerUnavailableError(
+            f"the running worker predates {kind!r} support — rebuild and "
+            "restart it (`docker compose up -d --build ingest`)"
+        )
 
     request_id = uuid.uuid4().hex[:12]
     request_path = settings.trigger_dir / f"{kind}-{request_id}{REQUEST_SUFFIX}"
@@ -403,6 +422,7 @@ class IngestWorker:
                 "updated_at": datetime.now(UTC).isoformat(),
                 "last_sync": self._last_sync.isoformat() if self._last_sync else None,
                 "interval_minutes": self.settings.sync_interval_minutes,
+                "supports": [KIND_SYNC, KIND_WORKOUT],
             },
         )
 

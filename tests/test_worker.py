@@ -232,3 +232,54 @@ class TestToolIntegration:
         monkeypatch.setattr(tools, "_settings", lambda: db)
         with pytest.raises(WorkerUnavailableError):
             tools.sync_now()
+
+
+class TestVersionMismatch:
+    """A worker from an older build must not fail as a silent timeout.
+
+    Found in real use: the container was still running an image built before
+    workout support existed. It ignored the request kind it did not know, the
+    caller waited out its full timeout, and the reported cause — "the worker
+    may be busy" — sent the diagnosis down three wrong paths in a row.
+    """
+
+    def test_the_heartbeat_advertises_what_the_worker_handles(self, db: Settings) -> None:
+        IngestWorker(db)._heartbeat()
+        status = read_worker_status(db)
+        assert "sync" in status.supports
+        assert "workout" in status.supports
+
+    def test_an_unsupported_kind_fails_immediately(self, db: Settings) -> None:
+        import json as _json
+
+        (db.trigger_dir / HEARTBEAT_FILENAME).write_text(
+            _json.dumps(
+                {
+                    "pid": 1,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "supports": ["sync"],
+                }
+            )
+        )
+        with pytest.raises(WorkerUnavailableError, match="does not handle"):
+            worker_module.request("workout", {}, db, timeout_s=999)
+
+    def test_a_heartbeat_without_the_field_is_treated_as_old(self, db: Settings) -> None:
+        # Builds predating the field advertise nothing; absence is the signal.
+        import json as _json
+
+        (db.trigger_dir / HEARTBEAT_FILENAME).write_text(
+            _json.dumps({"pid": 1, "updated_at": datetime.now(UTC).isoformat()})
+        )
+        with pytest.raises(WorkerUnavailableError, match="predates"):
+            worker_module.request("workout", {}, db, timeout_s=999)
+
+    def test_sync_still_works_against_an_older_worker(self, db: Settings) -> None:
+        # Backwards compatibility: only the new kind is refused.
+        import json as _json
+
+        (db.trigger_dir / HEARTBEAT_FILENAME).write_text(
+            _json.dumps({"pid": 1, "updated_at": datetime.now(UTC).isoformat()})
+        )
+        with pytest.raises(WorkerUnavailableError, match="did not answer"):
+            worker_module.request("sync", {}, db, timeout_s=1)
