@@ -1,4 +1,9 @@
 # syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
+#
+# The skip above is for GARMIN_TOKEN_DIR: the linter matches on the word
+# "TOKEN", but the value is a directory path. No secret is baked into this
+# image — the token is written at runtime into the mounted volume.
 #
 # Two targets:
 #   runtime     (default) — the HTTP backend only. Small.

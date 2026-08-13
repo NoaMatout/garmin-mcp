@@ -1,5 +1,9 @@
 # garmin-mcp
 
+[![CI](https://github.com/NoaMatout/garmin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/NoaMatout/garmin-mcp/actions/workflows/ci.yml)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 Ask questions about your Garmin training history in plain language, from
 Claude. Raw FIT files in, DuckDB out, five typed MCP tools on top.
 
