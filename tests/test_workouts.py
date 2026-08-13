@@ -207,7 +207,7 @@ class TestToolSafety:
             return {
                 "created": {
                     "workout_id": 42,
-                    "name": payload["name"],
+                    "name": payload["spec"]["name"],
                     "url": "https://connect.garmin.com/modern/workout/42",
                 },
                 "structure": "…",
@@ -242,3 +242,86 @@ class TestToolSafety:
         result = tools.delete_workout(42)
         assert result["deleted"] is False
         assert result["would_delete"] == 42
+
+
+class TestDiscoverability:
+    """An undo nobody can reach is not an undo.
+
+    delete_workout takes an id, and an id was only ever visible in the
+    conversation that created the workout. From a fresh session a model could
+    create sessions and never remove them — which made the claim that nothing
+    here is irreversible true only for whoever had the transcript.
+    """
+
+    def test_listing_works_even_when_writing_is_disabled(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Reading the library is not a write, and being unable to see what is
+        # there is unhelpful regardless of the switch.
+        assert settings.enable_writes is False
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda *_a, **_k: {"workouts": [{"workout_id": 7, "name": "Tempo"}]},
+        )
+        result = tools.list_workouts()
+        assert result["count"] == 1
+        assert result["workouts"][0]["workout_id"] == 7
+
+    def test_listing_asks_the_worker_rather_than_garmin_directly(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MCP server must never hold Garmin credentials.
+
+        Reading the workout library needs an authenticated session, so it goes
+        through the worker like everything else — otherwise adding this feature
+        would have quietly given the server the ability to authenticate.
+        """
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda payload, *_a, **_k: seen.append(payload) or {"workouts": []},
+        )
+        tools.list_workouts(limit=5)
+        assert seen == [{"action": "list", "limit": 5}]
+
+    def test_deleting_also_goes_through_the_worker(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        enabled = settings.model_copy(update={"enable_writes": True})
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda payload, *_a, **_k: seen.append(payload) or {"deleted": 42},
+        )
+        result = tools.delete_workout(42, confirm=True)
+        assert result["deleted"] is True
+        assert seen == [{"action": "delete", "workout_id": 42}]
+
+    def test_creation_sends_the_spec_under_a_create_action(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        enabled = settings.model_copy(update={"enable_writes": True})
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda payload, *_a, **_k: (
+                seen.append(payload) or {"created": {"workout_id": 1, "name": "x", "url": "u"}}
+            ),
+        )
+        tools.create_workout("Session", INTERVALS, confirm=True)
+        assert seen[0]["action"] == "create"
+        assert seen[0]["spec"]["name"] == "Session"
+
+    def test_the_limit_is_capped(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda payload, *_a, **_k: seen.append(payload) or {"workouts": []},
+        )
+        tools.list_workouts(limit=10**6)
+        assert seen[0]["limit"] == 100

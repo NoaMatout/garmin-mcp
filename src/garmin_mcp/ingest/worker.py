@@ -213,13 +213,17 @@ def request_sync(
 
 
 def request_workout(
-    spec_payload: dict[str, Any],
+    payload: dict[str, Any],
     settings: Settings | None = None,
     *,
     timeout_s: float = 60.0,
 ) -> dict[str, Any]:
-    """Ask the worker to create a workout on the athlete's Garmin account."""
-    return request(KIND_WORKOUT, {"spec": spec_payload}, settings, timeout_s=timeout_s)
+    """Ask the worker to act on the Garmin workout library.
+
+    `payload["action"]` is list, create or delete; anything else defaults to
+    create, which is what earlier builds sent.
+    """
+    return request(KIND_WORKOUT, payload, settings, timeout_s=timeout_s)
 
 
 # ─── the worker itself ────────────────────────────────────────────────
@@ -352,7 +356,7 @@ class IngestWorker:
             log.info("worker.serving_request", kind=kind, request_id=request_id)
 
             if kind == KIND_WORKOUT:
-                result = self._create_workout(payload.get("spec") or {})
+                result = self._handle_workout(payload)
             else:
                 result = self._run_cycle(limit=payload.get("limit"))
                 self._last_sync = datetime.now(UTC)
@@ -363,35 +367,44 @@ class IngestWorker:
             )
             self._heartbeat()
 
-    def _create_workout(self, spec_payload: dict[str, Any]) -> dict[str, Any]:
-        """Build and upload a session, reporting failure as data.
+    def _handle_workout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """List, create or delete a workout, reporting failure as data.
 
-        Runs here rather than in the MCP server because the worker already
-        holds the only credentialed session — and because keeping every write
-        in one process is what the single-writer design is for.
+        Runs here rather than in the MCP server because the worker holds the
+        only credentialed session — including for the read, so that listing
+        does not become a reason to give the server credentials.
         """
-        from garmin_mcp.garmin.workout_writer import create_workout
+        from garmin_mcp.garmin import workout_writer
         from garmin_mcp.garmin.workouts import spec_from_dict
 
-        try:
-            spec = spec_from_dict(spec_payload)
-            created = create_workout(spec, self.settings)
-        except GarminMcpError as exc:
-            log.warning("worker.workout_failed", error=str(exc))
-            return {
-                "finished_at": datetime.now(UTC).isoformat(),
-                "error": exc.message,
-                "hint": exc.hint,
-            }
-        except Exception as exc:
-            log.exception("worker.workout_failed")
-            return {"finished_at": datetime.now(UTC).isoformat(), "error": str(exc)}
+        action = payload.get("action", "create")
+        finished = datetime.now(UTC).isoformat()
 
-        return {
-            "finished_at": datetime.now(UTC).isoformat(),
-            "created": created.as_dict(),
-            "structure": spec.describe(),
-        }
+        try:
+            if action == "list":
+                return {
+                    "finished_at": finished,
+                    "workouts": workout_writer.list_workouts(
+                        self.settings, limit=int(payload.get("limit", 20))
+                    ),
+                }
+            if action == "delete":
+                workout_writer.delete_workout(int(payload["workout_id"]), self.settings)
+                return {"finished_at": finished, "deleted": int(payload["workout_id"])}
+
+            spec = spec_from_dict(payload.get("spec") or {})
+            created = workout_writer.create_workout(spec, self.settings)
+            return {
+                "finished_at": finished,
+                "created": created.as_dict(),
+                "structure": spec.describe(),
+            }
+        except GarminMcpError as exc:
+            log.warning("worker.workout_failed", action=action, error=str(exc))
+            return {"finished_at": finished, "error": exc.message, "hint": exc.hint}
+        except Exception as exc:
+            log.exception("worker.workout_failed", action=action)
+            return {"finished_at": finished, "error": str(exc)}
 
     def _expire_stale_requests(self) -> None:
         """Discard requests whose caller has long since given up."""

@@ -21,7 +21,7 @@ from typing import Any
 from garmin_mcp.config import Settings, get_settings
 from garmin_mcp.db import queries
 from garmin_mcp.db.connection import reading
-from garmin_mcp.errors import ActivityNotFoundError, DatabaseLockedError, GarminMcpError
+from garmin_mcp.errors import ActivityNotFoundError, DatabaseLockedError
 from garmin_mcp.logging import get_logger
 from garmin_mcp.server import formatters
 
@@ -434,7 +434,15 @@ def create_workout(
         }
 
     result = request_workout(
-        {"name": name, "blocks": blocks, "sport": sport, "description": description},
+        {
+            "action": "create",
+            "spec": {
+                "name": name,
+                "blocks": blocks,
+                "sport": sport,
+                "description": description,
+            },
+        },
         settings,
     )
 
@@ -454,17 +462,56 @@ def create_workout(
     }
 
 
+def list_workouts(limit: int = 20) -> dict[str, Any]:
+    """List the workouts saved in the athlete's Garmin library.
+
+    Args:
+        limit: How many to return, newest first (default 20, max 100).
+
+    Use this to find a workout's id — `delete_workout` needs one, and an id is
+    otherwise only ever visible in the conversation that created it. Reading,
+    so it works even when writing is disabled.
+    """
+    from garmin_mcp.ingest.worker import request_workout
+
+    limit = max(1, min(int(limit), 100))
+    result = request_workout({"action": "list", "limit": limit}, _settings())
+
+    if result.get("error"):
+        return {"workouts": [], "error": result["error"], "fix": result.get("hint")}
+
+    workouts = result.get("workouts", [])
+    log.info("tool.list_workouts", count=len(workouts))
+    return {
+        "count": len(workouts),
+        "workouts": [_compact_workout(w) for w in workouts],
+    }
+
+
+def _compact_workout(raw: dict[str, Any]) -> dict[str, Any]:
+    from garmin_mcp.domain.units import format_duration
+
+    entry = {
+        "workout_id": raw.get("workout_id"),
+        "name": raw.get("name"),
+        "sport": raw.get("sport"),
+        "duration": format_duration(raw.get("estimated_duration_s")),
+        "updated": (raw.get("updated") or "")[:10] or None,
+    }
+    return {k: v for k, v in entry.items() if v is not None}
+
+
 def delete_workout(workout_id: int, confirm: bool = False) -> dict[str, Any]:
     """Remove a workout from the athlete's Garmin library.
 
     Args:
-        workout_id: The id returned by create_workout.
+        workout_id: The id, from list_workouts or from create_workout.
         confirm: Must be true to actually delete.
 
     The undo for create_workout. Same two-step rule: without confirm it
     reports what would be removed and does nothing.
     """
-    from garmin_mcp.garmin.workout_writer import delete_workout as do_delete
+    from garmin_mcp.ingest.worker import request_workout
 
     settings = _settings()
     if not settings.enable_writes:
@@ -481,10 +528,11 @@ def delete_workout(workout_id: int, confirm: bool = False) -> dict[str, Any]:
             "next_step": "call again with confirm=true to remove it",
         }
 
-    try:
-        do_delete(workout_id, settings)
-    except GarminMcpError as exc:
-        return {"deleted": False, "error": exc.message, "fix": exc.hint}
+    # Through the worker, like every other Garmin call: the MCP server holds
+    # no credentials and must not start doing so for the sake of one delete.
+    result = request_workout({"action": "delete", "workout_id": workout_id}, settings)
+    if result.get("error"):
+        return {"deleted": False, "error": result["error"], "fix": result.get("hint")}
 
     log.info("tool.delete_workout", workout_id=workout_id)
     return {"deleted": True, "workout_id": workout_id}

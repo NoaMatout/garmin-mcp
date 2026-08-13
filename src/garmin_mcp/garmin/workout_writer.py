@@ -1,4 +1,4 @@
-"""Sending a workout to Garmin.
+"""The Garmin workout library: reading it, and writing to it.
 
 Kept apart from `ActivitySource` on purpose. That interface is read-only and
 its implementations cannot authenticate; writing is a different capability
@@ -72,6 +72,46 @@ def _client(settings: Settings) -> Any:
 
         raise _translate(exc) from exc
     return client
+
+
+def list_workouts(
+    settings: Settings | None = None,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """The athlete's saved workouts, newest first.
+
+    Reading, so it is not behind the write switch — but it exists because of
+    writing. A delete tool that takes an id nobody can discover is not an undo
+    at all: the id is only ever returned at creation, in that one conversation.
+    Without this, a model could create sessions and never remove them.
+    """
+    settings = settings or get_settings()
+    client = _client(settings)
+
+    try:
+        raw = client.get_workouts(0, max(1, min(limit, 100)))
+    except Exception as exc:
+        from garmin_mcp.garmin.cffi_source import _translate
+
+        raise _translate(exc) from exc
+
+    workouts = []
+    for entry in raw or []:
+        workout_id = entry.get("workoutId")
+        if workout_id is None:
+            continue
+        workouts.append(
+            {
+                "workout_id": int(workout_id),
+                "name": entry.get("workoutName"),
+                "sport": (entry.get("sportType") or {}).get("sportTypeKey"),
+                "estimated_duration_s": entry.get("estimatedDurationInSecs"),
+                "updated": entry.get("updateDate") or entry.get("createDate"),
+            }
+        )
+    log.info("workout.listed", count=len(workouts))
+    return workouts
 
 
 def create_workout(
