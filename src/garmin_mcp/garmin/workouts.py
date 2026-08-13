@@ -148,9 +148,11 @@ class Step:
             extent = f"{metres / 1000:g} km" if metres >= 1000 else f"{metres:g} m"
         target = ""
         if self.target_pace:
-            target = f" at {self.target_pace}/km"
-            if not self.alert:
-                target += " (no alert)"
+            # Say which it is either way. Saying nothing when alerts are on
+            # meant an athlete could confirm a session without ever seeing
+            # that their watch would beep through every interval.
+            state = "alerts on" if self.alert else "no alert"
+            target = f" at {self.target_pace}/km ({state})"
         return f"{self.kind} {extent}{target}"
 
 

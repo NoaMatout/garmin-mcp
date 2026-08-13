@@ -162,7 +162,8 @@ class TestBuiltPayload:
         # it has to be legible rather than a dump of fields.
         spec = spec_from_dict({"name": "Intervals", "blocks": INTERVALS})
         assert spec.describe() == (
-            "warmup 20min → 12 × (interval 1min at 3:45/km, then recovery 1min) → cooldown 10min"
+            "warmup 20min → 12 × (interval 1min at 3:45/km (alerts on), "
+            "then recovery 1min) → cooldown 10min"
         )
 
 
@@ -378,6 +379,21 @@ class TestSilentPaceTargets:
         )
         step = _steps_of(build_workout(spec))[0]
         assert step["targetType"]["workoutTargetTypeKey"] == "pace.zone"
+
+    def test_the_preview_states_the_choice_in_both_directions(self) -> None:
+        """Saying nothing when alerts are on hid the choice.
+
+        An athlete confirmed three sessions from a preview that never
+        mentioned alerting, and found out on the run that the watch beeped
+        through every interval.
+        """
+        alerted = spec_from_dict(
+            {
+                "name": "Alerted",
+                "blocks": [{"kind": "interval", "distance_m": 1000, "target_pace": "3:45"}],
+            }
+        )
+        assert "alerts on" in alerted.describe()
 
     def test_the_preview_says_when_alerts_are_off(self) -> None:
         # The athlete confirms from this text, so it must not hide the choice.

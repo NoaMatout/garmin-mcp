@@ -379,7 +379,8 @@ def create_workout(
         blocks: The session, in order. A block is either a step or a repeat.
             Step: {"kind": "warmup"|"interval"|"recovery"|"cooldown"|"rest",
                    "duration_s": 1200}  or  {"distance_m": 2000},
-                   optionally "target_pace": "3:55" and "pace_tolerance_s": 5.
+                   optionally "target_pace": "3:55", "pace_tolerance_s": 5,
+                   and "alert": true|false.
                    Exactly one of duration_s or distance_m per step.
             Repeat: {"times": 4, "steps": [ ...steps... ]}
         sport: running, cycling or swimming.
@@ -391,6 +392,18 @@ def create_workout(
     with confirm=true once they have agreed — this puts a real workout on their
     Garmin account and onto their watch, and they should see it before that
     happens rather than after.
+
+    **Ask about pace alerts whenever a step has a target and the athlete has
+    not said.** With `"alert": true` (the default) the watch beeps whenever
+    they drift outside the range, for every interval; with `"alert": false`
+    the pace is shown but nothing sounds. It is a strong personal preference,
+    it cannot be guessed from their data, and it is discovered mid-session if
+    guessed wrong. The preview states which is in force.
+
+    **Watch for ambiguous prescriptions.** "5x1km à 3:00" may mean five
+    kilometres at 3:00/km or five kilometres with 3:00 of recovery. If a pace
+    looks inconsistent with the athlete's recent sessions, say so and ask
+    rather than putting an impossible target on their watch.
 
     Example blocks for "20 min easy, then 12 x 1 min at 3:45 with 1 min float":
         [{"kind": "warmup", "duration_s": 1200},
