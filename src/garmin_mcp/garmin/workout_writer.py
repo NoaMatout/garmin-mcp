@@ -192,6 +192,34 @@ def schedule_workout(
     log.info("workout.scheduled", workout_id=workout_id, date=date_str)
 
 
+def set_activity_notes(
+    activity_id: int,
+    notes: str,
+    settings: Settings | None = None,
+) -> None:
+    """Write the Notes field of a completed activity.
+
+    Turns an analysis from something said once in a chat into a durable trace
+    attached to the session itself, visible in Garmin Connect and to anyone the
+    athlete shares the activity with.
+    """
+    settings = settings or get_settings()
+    if not settings.enable_writes:
+        raise WritesDisabledError()
+
+    # Garmin's own limit; truncating with a marker beats a rejected request.
+    text = notes if len(notes) <= 2000 else notes[:1997] + "..."
+
+    client = _client(settings)
+    try:
+        client.set_activity_description(str(activity_id), text)
+    except Exception as exc:
+        from garmin_mcp.garmin.cffi_source import _translate
+
+        raise _translate(exc) from exc
+    log.info("activity.notes_written", activity_id=activity_id, chars=len(text))
+
+
 def _extract_id(response: Any) -> int | None:
     """Find the workout id in whatever shape Garmin replied with."""
     if isinstance(response, int):

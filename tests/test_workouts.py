@@ -325,3 +325,125 @@ class TestDiscoverability:
         )
         tools.list_workouts(limit=10**6)
         assert seen[0]["limit"] == 100
+
+
+class TestSilentPaceTargets:
+    """Some athletes want the number without the watch policing it.
+
+    A watch buzzing on every fluctuation trains you to ignore it, so an
+    unalerted target sets no pace zone — but the pace still has to reach the
+    screen, since the athlete is pacing off it themselves.
+    """
+
+    def test_alerts_off_sets_no_pace_zone(self) -> None:
+        spec = spec_from_dict(
+            {
+                "name": "Silent",
+                "blocks": [
+                    {
+                        "kind": "interval",
+                        "distance_m": 1000,
+                        "target_pace": "3:45",
+                        "alert": False,
+                    }
+                ],
+            }
+        )
+        step = _steps_of(build_workout(spec))[0]
+        assert step["targetType"]["workoutTargetTypeKey"] == "no.target"
+        assert "targetValueOne" not in step
+
+    def test_the_pace_still_appears_on_the_step(self) -> None:
+        spec = spec_from_dict(
+            {
+                "name": "Silent",
+                "blocks": [
+                    {
+                        "kind": "interval",
+                        "distance_m": 1000,
+                        "target_pace": "3:45",
+                        "alert": False,
+                    }
+                ],
+            }
+        )
+        assert "3:45/km" in _steps_of(build_workout(spec))[0]["description"]
+
+    def test_alerts_stay_on_by_default(self) -> None:
+        spec = spec_from_dict(
+            {
+                "name": "Alerted",
+                "blocks": [{"kind": "interval", "distance_m": 1000, "target_pace": "3:45"}],
+            }
+        )
+        step = _steps_of(build_workout(spec))[0]
+        assert step["targetType"]["workoutTargetTypeKey"] == "pace.zone"
+
+    def test_the_preview_says_when_alerts_are_off(self) -> None:
+        # The athlete confirms from this text, so it must not hide the choice.
+        spec = spec_from_dict(
+            {
+                "name": "Silent",
+                "blocks": [
+                    {
+                        "kind": "interval",
+                        "distance_m": 1000,
+                        "target_pace": "3:45",
+                        "alert": False,
+                    }
+                ],
+            }
+        )
+        assert "no alert" in spec.describe()
+
+
+class TestScheduleAndNotes:
+    def test_scheduling_is_separate_from_creating(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A workout in the library is a suggestion; one on a date is a plan."""
+        enabled = settings.model_copy(update={"enable_writes": True})
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        result = tools.schedule_workout(7, "2026-08-19")
+        assert result["scheduled"] is False
+        assert result["would_schedule"]["date"] == "2026-08-19"
+
+    def test_scheduling_rejects_a_malformed_date(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        enabled = settings.model_copy(update={"enable_writes": True})
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        with pytest.raises(ValueError, match="ISO date"):
+            tools.schedule_workout(7, "next tuesday")
+
+    def test_notes_warn_that_they_replace_what_is_there(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The athlete may have written something in that field themselves.
+        enabled = settings.model_copy(update={"enable_writes": True})
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        result = tools.set_activity_notes(1, "Felt strong")
+        assert result["written"] is False
+        assert "replaces" in result["warning"]
+
+    def test_notes_go_through_the_worker(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        enabled = settings.model_copy(update={"enable_writes": True})
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_activity_edit",
+            lambda payload, *_a, **_k: seen.append(payload) or {"activity_id": 1},
+        )
+        result = tools.set_activity_notes(1, "Felt strong", confirm=True)
+        assert result["written"] is True
+        assert seen == [{"activity_id": 1, "notes": "Felt strong"}]
+
+    def test_empty_notes_are_rejected(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        enabled = settings.model_copy(update={"enable_writes": True})
+        monkeypatch.setattr(tools, "_settings", lambda: enabled)
+        with pytest.raises(ValueError, match="cannot be empty"):
+            tools.set_activity_notes(1, "   ", confirm=True)

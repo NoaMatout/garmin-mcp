@@ -6,7 +6,7 @@
 
 Ask questions about your Garmin training history in plain language, from
 Claude — and send structured sessions back to your watch. Raw FIT files in,
-DuckDB out, ten typed MCP tools on top.
+DuckDB out, twelve typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -64,7 +64,7 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │  10 typed tools, no     │
+              │  12 typed tools, no     │
               │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
@@ -138,6 +138,8 @@ uv run garmin-mcp sync --limit 50
 | `list_workouts` | Saved sessions in your Garmin library, with their ids | 20 by default, 100 max |
 | `create_workout` | Put a structured session on your Garmin account | off by default, two-step |
 | `delete_workout` | Undo the above | off by default, two-step |
+| `schedule_workout` | Put a saved session on a date in your calendar | off by default, two-step |
+| `set_activity_notes` | Write an analysis into an activity's Notes field | off by default, two-step |
 
 ## Design decisions
 
@@ -243,10 +245,10 @@ confirmation real rather than ceremonial.
 makes ids discoverable. Without it the undo existed only for whoever still had
 the conversation that created the workout, which is not an undo.
 
-**Not scheduled, not pushed.** A created workout lands in the library and syncs
-to the watch from there. Putting it on a date, or pushing it to a device, stay
-out of scope: a suggestion appearing on tomorrow's calendar unasked is a
-different thing from one sitting in a list.
+**Not scheduled unless asked.** A created workout lands in the library and
+syncs to the watch from there. Scheduling it on a date is a separate tool with
+its own confirmation, because a workout in the library is a suggestion and one
+on tomorrow's calendar is a plan.
 
 **Still no credentials in the server.** Every call that needs an authenticated
 session — including reading the workout library — goes through the ingest
@@ -306,8 +308,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 175 tests, hermetic — no data, no network
-make test-all    # 219 tests, adds validation against real recordings
+make test        # 184 tests, hermetic — no data, no network
+make test-all    # 228 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so
@@ -413,10 +415,9 @@ traces start where you live.
   ingested. The schema leaves room for them.
 - **One user per database.** Multi-tenancy would be one database file per user
   rather than a `user_id` column.
-- **Writing covers workouts, nothing else.** Creating and deleting sessions in
-  your library, and that is all. Scheduling one on a date, pushing it to a
-  device, and editing an existing session are not exposed, though the library
-  supports them.
+- **Writing covers workouts, scheduling and activity notes.** Pushing a
+  workout directly to a device, and editing an existing session, are not
+  exposed, though the library supports both.
 
 ## License
 

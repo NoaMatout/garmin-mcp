@@ -108,6 +108,11 @@ class Step:
     distance_m: float | None = None
     target_pace: str | None = None
     pace_tolerance_s: int = 5
+    # Whether the watch should police the target. Off means the pace is
+    # written into the step so it is visible while running, but no alert
+    # fires — some athletes want the number, not the beeping, and a watch
+    # buzzing on every fluctuation trains you to ignore it.
+    alert: bool = True
     note: str | None = None
 
     def validate(self) -> None:
@@ -141,7 +146,11 @@ class Step:
         else:
             metres = self.distance_m or 0
             extent = f"{metres / 1000:g} km" if metres >= 1000 else f"{metres:g} m"
-        target = f" at {self.target_pace}/km" if self.target_pace else ""
+        target = ""
+        if self.target_pace:
+            target = f" at {self.target_pace}/km"
+            if not self.alert:
+                target += " (no alert)"
         return f"{self.kind} {extent}{target}"
 
 
@@ -212,6 +221,13 @@ class WorkoutSpec:
         }
 
 
+def _silent_target_note(step: Step) -> str | None:
+    """Text form of a target the watch will not alert on."""
+    if step.target_pace and not step.alert:
+        return f"target {step.target_pace}/km"
+    return None
+
+
 def _human_duration(seconds: int) -> str:
     minutes, secs = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
@@ -251,7 +267,7 @@ def _build_step(step: Step, order: int) -> Any:
         payload["endCondition"] = _enum(_END_CONDITIONS, "distance", "conditionTypeId")
         payload["endConditionValue"] = float(step.distance_m or 0)
 
-    if step.target_pace:
+    if step.target_pace and step.alert:
         # Garmin expresses a pace target as a speed range in metres per second,
         # so the faster pace is the *higher* value. Getting these the wrong way
         # round produces a workout the watch silently ignores.
@@ -264,8 +280,11 @@ def _build_step(step: Step, order: int) -> Any:
     else:
         payload["targetType"] = _enum(_TARGET_TYPES, "no.target", "workoutTargetTypeId")
 
-    if step.note:
-        payload["description"] = step.note
+    # An unalerted target still belongs on the screen — the athlete is pacing
+    # off it themselves, which is the entire point of switching alerts off.
+    parts = [p for p in (step.note, _silent_target_note(step)) if p]
+    if parts:
+        payload["description"] = " — ".join(parts)
 
     return ExecutableStep(**payload)
 
@@ -349,7 +368,15 @@ def spec_from_dict(payload: dict[str, Any]) -> WorkoutSpec:
     )
 
 
-_STEP_KEYS = {"kind", "duration_s", "distance_m", "target_pace", "pace_tolerance_s", "note"}
+_STEP_KEYS = {
+    "kind",
+    "duration_s",
+    "distance_m",
+    "target_pace",
+    "pace_tolerance_s",
+    "alert",
+    "note",
+}
 _REPEAT_KEYS = {"repeat", "times", "steps"}
 
 
@@ -377,5 +404,6 @@ def _step_from_dict(raw: dict[str, Any]) -> Step:
         distance_m=raw.get("distance_m"),
         target_pace=raw.get("target_pace"),
         pace_tolerance_s=int(raw.get("pace_tolerance_s", 5)),
+        alert=bool(raw.get("alert", True)),
         note=raw.get("note"),
     )

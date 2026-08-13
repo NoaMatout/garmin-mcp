@@ -58,6 +58,7 @@ RESULT_SUFFIX = ".result.json"
 # server because the worker already holds the only credentialed session.
 KIND_SYNC = "sync"
 KIND_WORKOUT = "workout"
+KIND_ACTIVITY = "activity"
 
 # How often the loop wakes to look for a trigger. Short enough that `sync_now`
 # feels immediate, long enough to be invisible in a `top` listing.
@@ -212,6 +213,16 @@ def request_sync(
     return request(KIND_SYNC, {"limit": limit}, settings, timeout_s=timeout_s)
 
 
+def request_activity_edit(
+    payload: dict[str, Any],
+    settings: Settings | None = None,
+    *,
+    timeout_s: float = 60.0,
+) -> dict[str, Any]:
+    """Ask the worker to modify a completed activity."""
+    return request(KIND_ACTIVITY, payload, settings, timeout_s=timeout_s)
+
+
 def request_workout(
     payload: dict[str, Any],
     settings: Settings | None = None,
@@ -338,11 +349,28 @@ class IngestWorker:
         finally:
             source.close()
 
+    def _handle_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Edit a completed activity — currently only its Notes field."""
+        from garmin_mcp.garmin import workout_writer
+
+        finished = datetime.now(UTC).isoformat()
+        try:
+            workout_writer.set_activity_notes(
+                int(payload["activity_id"]), str(payload.get("notes", "")), self.settings
+            )
+        except GarminMcpError as exc:
+            log.warning("worker.activity_edit_failed", error=str(exc))
+            return {"finished_at": finished, "error": exc.message, "hint": exc.hint}
+        except Exception as exc:
+            log.exception("worker.activity_edit_failed")
+            return {"finished_at": finished, "error": str(exc)}
+        return {"finished_at": finished, "activity_id": int(payload["activity_id"])}
+
     # ─── trigger files ────────────────────────────────────────────────
 
     def _pending_requests(self) -> list[Path]:
         requests: list[Path] = []
-        for kind in (KIND_SYNC, KIND_WORKOUT):
+        for kind in (KIND_SYNC, KIND_WORKOUT, KIND_ACTIVITY):
             requests += self.settings.trigger_dir.glob(f"{kind}-*{REQUEST_SUFFIX}")
         return sorted(requests)
 
@@ -357,6 +385,8 @@ class IngestWorker:
 
             if kind == KIND_WORKOUT:
                 result = self._handle_workout(payload)
+            elif kind == KIND_ACTIVITY:
+                result = self._handle_activity(payload)
             else:
                 result = self._run_cycle(limit=payload.get("limit"))
                 self._last_sync = datetime.now(UTC)
@@ -391,6 +421,15 @@ class IngestWorker:
             if action == "delete":
                 workout_writer.delete_workout(int(payload["workout_id"]), self.settings)
                 return {"finished_at": finished, "deleted": int(payload["workout_id"])}
+            if action == "schedule":
+                workout_writer.schedule_workout(
+                    int(payload["workout_id"]), str(payload["date"]), self.settings
+                )
+                return {
+                    "finished_at": finished,
+                    "scheduled": int(payload["workout_id"]),
+                    "date": payload["date"],
+                }
 
             spec = spec_from_dict(payload.get("spec") or {})
             created = workout_writer.create_workout(spec, self.settings)
@@ -435,7 +474,7 @@ class IngestWorker:
                 "updated_at": datetime.now(UTC).isoformat(),
                 "last_sync": self._last_sync.isoformat() if self._last_sync else None,
                 "interval_minutes": self.settings.sync_interval_minutes,
-                "supports": [KIND_SYNC, KIND_WORKOUT],
+                "supports": [KIND_SYNC, KIND_WORKOUT, KIND_ACTIVITY],
             },
         )
 

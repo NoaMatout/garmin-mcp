@@ -536,3 +536,91 @@ def delete_workout(workout_id: int, confirm: bool = False) -> dict[str, Any]:
 
     log.info("tool.delete_workout", workout_id=workout_id)
     return {"deleted": True, "workout_id": workout_id}
+
+
+def schedule_workout(workout_id: int, date: str, confirm: bool = False) -> dict[str, Any]:
+    """Put a saved workout on a date in the athlete's Garmin calendar.
+
+    Args:
+        workout_id: The id, from list_workouts or create_workout.
+        date: ISO date, e.g. "2026-08-19".
+        confirm: Must be true to actually schedule.
+
+    Separate from creating on purpose. A workout in the library is a
+    suggestion; one on tomorrow's calendar is a plan, and the athlete should
+    say which they meant.
+    """
+    from garmin_mcp.ingest.worker import request_workout
+
+    settings = _settings()
+    if not settings.enable_writes:
+        return {
+            "scheduled": False,
+            "error": "writing to Garmin is disabled on this installation",
+        }
+
+    when = _parse_date(date, field="date")
+    if when is None:
+        raise ValueError("date is required, as an ISO date such as 2026-08-19")
+
+    workout_id = int(workout_id)
+    if not confirm:
+        return {
+            "scheduled": False,
+            "would_schedule": {"workout_id": workout_id, "date": when.isoformat()},
+            "next_step": "call again with confirm=true to put it on the calendar",
+        }
+
+    result = request_workout(
+        {"action": "schedule", "workout_id": workout_id, "date": when.isoformat()},
+        settings,
+    )
+    if result.get("error"):
+        return {"scheduled": False, "error": result["error"], "fix": result.get("hint")}
+
+    log.info("tool.schedule_workout", workout_id=workout_id, date=when.isoformat())
+    return {"scheduled": True, "workout_id": workout_id, "date": when.isoformat()}
+
+
+def set_activity_notes(activity_id: int, notes: str, confirm: bool = False) -> dict[str, Any]:
+    """Write the Notes field of a completed activity in Garmin Connect.
+
+    Args:
+        activity_id: The activity's id.
+        notes: The text to store, up to 2000 characters.
+        confirm: Must be true to actually write.
+
+    Useful for keeping an analysis attached to the session it describes,
+    rather than leaving it in a conversation nobody will find again. Replaces
+    whatever is already in the field, so read it back first if the athlete may
+    have written something there themselves.
+    """
+    from garmin_mcp.ingest.worker import request_activity_edit
+
+    settings = _settings()
+    if not settings.enable_writes:
+        return {
+            "written": False,
+            "error": "writing to Garmin is disabled on this installation",
+        }
+
+    activity_id = int(activity_id)
+    text = (notes or "").strip()
+    if not text:
+        raise ValueError("notes cannot be empty")
+
+    if not confirm:
+        return {
+            "written": False,
+            "preview": text[:500] + ("…" if len(text) > 500 else ""),
+            "characters": len(text),
+            "warning": "this replaces the existing Notes field entirely",
+            "next_step": "call again with confirm=true to write it",
+        }
+
+    result = request_activity_edit({"activity_id": activity_id, "notes": text}, settings)
+    if result.get("error"):
+        return {"written": False, "error": result["error"], "fix": result.get("hint")}
+
+    log.info("tool.set_activity_notes", activity_id=activity_id, chars=len(text))
+    return {"written": True, "activity_id": activity_id, "characters": len(text)}
