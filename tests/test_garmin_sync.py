@@ -344,3 +344,64 @@ class TestErrorTranslation:
         translated = _translate(RuntimeError("HTTP 403 forbidden by cloudflare"))
         assert isinstance(translated, GarminBlockedError)
         assert "inbox" in (translated.hint or "").lower()
+
+
+class TestActivityNames:
+    """Titles live in Garmin, not in the FIT file.
+
+    The writer replaces rather than merges, so anything that rebuilds a row
+    from the file alone drops them. A re-parse stripped the title from 65 of
+    66 activities before this was noticed — silently, since nothing errors.
+    """
+
+    def test_a_reparse_keeps_the_titles_already_stored(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.ingest.pipeline import reparse_stored
+
+        source = FakeSource([_stub(1001, 0)], payloads={1001: fit_builder.build_run(start=START)})
+        sync_from_garmin(source, db)
+
+        with duckdb.connect(str(db.db_path)) as conn:
+            conn.execute("UPDATE activities SET name = 'Morning run'")
+
+        reparse_stored(db, force=True)
+
+        with duckdb.connect(str(db.db_path), read_only=True) as conn:
+            name = conn.execute("SELECT name FROM activities").fetchone()[0]
+        assert name == "Morning run"
+
+    def test_a_sync_refreshes_titles_without_downloading(self, db: Settings) -> None:
+        """The listing carries names anyway, so keeping them current is free.
+
+        It is also the repair path: a title edited in Garmin Connect, or one
+        lost to a re-parse, comes back on the next sync with no download.
+        """
+        payload = {1001: fit_builder.build_run(start=START)}
+        sync_from_garmin(FakeSource([_stub(1001, 0)], payloads=payload), db)
+
+        with duckdb.connect(str(db.db_path)) as conn:
+            conn.execute("UPDATE activities SET name = NULL")
+
+        renamed = FakeSource([_stub(1001, 0)], payloads=payload)
+        sync_from_garmin(renamed, db)
+
+        assert renamed.downloaded == []  # nothing re-fetched
+        with duckdb.connect(str(db.db_path), read_only=True) as conn:
+            assert conn.execute("SELECT name FROM activities").fetchone()[0] == "Activity 1001"
+
+
+class TestDownloadCap:
+    def test_the_limit_bounds_downloads_not_the_listing(self, db: Settings) -> None:
+        """Conflating the two meant the name refresh only saw a slice.
+
+        Listing is one cheap call; downloading is what needs rationing.
+        """
+        stubs = [_stub(1000 + i, i) for i in range(10)]
+        payloads = {s.activity_id: fit_builder.build_run(start=s.start_time_utc) for s in stubs}
+        source = FakeSource(stubs, payloads=payloads)
+
+        sync_from_garmin(source, db, limit=3)
+
+        assert len(source.downloaded) == 3
+        assert source.list_calls  # the listing was not limited to 3

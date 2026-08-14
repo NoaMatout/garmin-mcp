@@ -51,6 +51,45 @@ def known_garmin_ids(conn: duckdb.DuckDBPyConnection) -> set[int]:
     return {int(row[0]) for row in rows}
 
 
+def activity_names(conn: duckdb.DuckDBPyConnection) -> dict[int, str]:
+    """Activity titles already stored, keyed by Garmin id.
+
+    Titles are set in Garmin Connect and arrive with the activity listing, not
+    inside the FIT file. Re-parsing rebuilds rows from the file alone, so they
+    have to be carried across explicitly or they are lost.
+    """
+    rows = conn.execute(
+        "SELECT garmin_activity_id, name FROM activities "
+        "WHERE garmin_activity_id IS NOT NULL AND name IS NOT NULL"
+    ).fetchall()
+    return {int(row[0]): str(row[1]) for row in rows}
+
+
+def refresh_activity_names(conn: duckdb.DuckDBPyConnection, names: dict[int, str]) -> int:
+    """Store titles for activities already ingested, and report how many changed.
+
+    The activity listing carries names and is fetched on every sync anyway, so
+    keeping them current costs nothing extra. Without this, a title edited in
+    Garmin Connect never reaches the database — and a re-parse that dropped
+    them would need a full re-download to recover.
+    """
+    if not names:
+        return 0
+
+    updated = 0
+    for garmin_id, name in names.items():
+        result = conn.execute(
+            """
+            UPDATE activities SET name = ?
+            WHERE garmin_activity_id = ?
+              AND (name IS NULL OR name <> ?)
+            """,
+            [name, garmin_id, name],
+        )
+        updated += result.fetchall()[0][0] if result.description else 0
+    return updated
+
+
 def failed_file_hashes(conn: duckdb.DuckDBPyConnection) -> set[str]:
     """Files that previously failed to parse.
 

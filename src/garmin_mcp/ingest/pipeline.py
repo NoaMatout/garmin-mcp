@@ -36,6 +36,10 @@ from garmin_mcp.logging import get_logger
 
 log = get_logger(__name__)
 
+# How many activities to list per sync. Garmin caps a page at 100, and the
+# call is cheap — it is the downloads that need rationing.
+_LISTING_WINDOW = 100
+
 
 @dataclass(slots=True)
 class FileOutcome:
@@ -254,8 +258,20 @@ def sync_from_garmin(
         watermark = since or _watermark(conn)
         known = queries.known_garmin_ids(conn)
 
+    # `limit` bounds how much is downloaded, not how much is looked at.
+    # Listing is one cheap call and drives the name refresh below, so it asks
+    # for a generous window and the cap is applied to downloads instead.
     log.info("sync.listing", since=str(watermark), limit=limit, backend=source.name)
-    stubs = source.list_activities(since=watermark, limit=limit)
+    stubs = source.list_activities(since=watermark, limit=max(limit, _LISTING_WINDOW))
+
+    # Titles are already in the listing, so refreshing them is free. It also
+    # repairs anything a re-parse stripped, without re-downloading a byte.
+    titles = {s.activity_id: s.name for s in stubs if s.name}
+    if titles:
+        with writing(settings) as conn:
+            renamed = queries.refresh_activity_names(conn, titles)
+        if renamed:
+            log.info("sync.names_refreshed", count=renamed)
 
     pending = [s for s in stubs if force or s.activity_id not in known]
     if not pending:
@@ -263,6 +279,11 @@ def sync_from_garmin(
         return report
 
     pending.sort(key=lambda s: s.start_time_utc)
+    if len(pending) > limit:
+        # Oldest first, so an interrupted backfill still leaves a contiguous
+        # history and the next run picks up where this one stopped.
+        log.info("sync.capped", found=len(pending), downloading=limit)
+        pending = pending[:limit]
     log.info("sync.downloading", count=len(pending))
 
     for stub in pending:
@@ -335,6 +356,12 @@ def reparse_stored(
         log.info("reparse.nothing_stored", path=str(settings.raw_dir))
         return report
 
+    # Names come from the Garmin API, not from the FIT file, and the writer
+    # replaces rather than merges — so without carrying them across, a re-parse
+    # silently strips every activity title in the database. Found the hard way.
+    with writing(settings) as conn:
+        known_names = queries.activity_names(conn)
+
     log.info("reparse.starting", files=len(files), parser_version=PARSER_VERSION)
     for path in files:
         # Each file gets its own short write window: the MCP server cannot
@@ -349,6 +376,7 @@ def reparse_stored(
                     # relabel a Garmin download as a manual import.
                     source=_stored_source(conn, path),
                     garmin_activity_id=_garmin_id_from_name(path),
+                    activity_name=known_names.get(_garmin_id_from_name(path) or -1),
                     settings=settings,
                     force=force,
                 )
