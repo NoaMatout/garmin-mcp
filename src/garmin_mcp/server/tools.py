@@ -749,3 +749,112 @@ def unschedule_workout(schedule_id: int, confirm: bool = False) -> dict[str, Any
 
     log.info("tool.unschedule_workout", schedule_id=schedule_id)
     return {"unscheduled": True, "schedule_id": schedule_id}
+
+
+def plan_adherence(week_start: str | None = None) -> dict[str, Any]:
+    """What was planned for a week against what was actually done.
+
+    Args:
+        week_start: Any ISO date within the week. Snapped back to the Monday.
+            Defaults to the current week.
+
+    Crosses the Garmin calendar with the recorded activities and reports one
+    line per planned session:
+
+    - `completed_from_plan` — run from the scheduled workout, so
+      `compare_to_plan` can break it down step by step;
+    - `completed_off_plan` — something was recorded that day, but not started
+      from the scheduled workout. The session may well have been done exactly
+      as written; the watch simply never linked the two, which happens when a
+      workout fails to sync to the device. No step-by-step comparison exists;
+    - `missed` — nothing recorded that day.
+
+    Activities with nothing scheduled are listed separately rather than being
+    treated as errors.
+    """
+    from garmin_mcp.ingest.worker import request_workout
+
+    settings = _settings()
+    requested = _parse_date(week_start, field="week_start") or date.today()
+    monday = requested - timedelta(days=requested.weekday())
+    sunday = monday + timedelta(days=6)
+
+    # A week can straddle two months, and the calendar is fetched per month.
+    scheduled: list[dict[str, Any]] = []
+    calendar_error: str | None = None
+    for year, month in dict.fromkeys([(monday.year, monday.month), (sunday.year, sunday.month)]):
+        result = request_workout(
+            {"action": "list_scheduled", "year": year, "month": month}, settings
+        )
+        if result.get("error"):
+            calendar_error = result["error"]
+            break
+        scheduled += result.get("scheduled", [])
+
+    planned_by_date: dict[str, dict[str, Any]] = {
+        entry["date"]: entry
+        for entry in scheduled
+        if entry.get("date") and monday.isoformat() <= entry["date"] <= sunday.isoformat()
+    }
+
+    with reading(settings) as conn:
+        activities = queries.activities_with_plan_flag(conn, monday, sunday)
+
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for activity in activities:
+        stamp = activity["start_time_local"]
+        by_date.setdefault(stamp.date().isoformat(), []).append(activity)
+
+    days: list[dict[str, Any]] = []
+    matched: set[int] = set()
+
+    for day in sorted(planned_by_date):
+        plan = planned_by_date[day]
+        candidates = by_date.get(day, [])
+        # Prefer an activity of the same sport; otherwise take the day's first.
+        chosen = next(
+            (a for a in candidates if a.get("sport") == plan.get("sport")),
+            candidates[0] if candidates else None,
+        )
+
+        entry: dict[str, Any] = {"date": day, "planned": plan.get("name")}
+        if chosen is None:
+            entry["status"] = "missed"
+        else:
+            matched.add(int(chosen["activity_id"]))
+            entry["activity"] = formatters.summarize_activity(chosen)
+            if chosen.get("has_plan"):
+                entry["status"] = "completed_from_plan"
+            else:
+                entry["status"] = "completed_off_plan"
+                entry["note"] = (
+                    "recorded that day but not started from the scheduled workout — "
+                    "the session may still have been run as written, but no "
+                    "step-by-step comparison is possible"
+                )
+        days.append(entry)
+
+    unplanned = [
+        formatters.summarize_activity(a) for a in activities if int(a["activity_id"]) not in matched
+    ]
+
+    report: dict[str, Any] = {
+        "week_start": monday.isoformat(),
+        "week_end": sunday.isoformat(),
+        "planned": len(planned_by_date),
+        "completed_from_plan": sum(1 for d in days if d["status"] == "completed_from_plan"),
+        "completed_off_plan": sum(1 for d in days if d["status"] == "completed_off_plan"),
+        "missed": sum(1 for d in days if d["status"] == "missed"),
+        "days": days,
+    }
+    if unplanned:
+        report["unplanned_activities"] = unplanned
+    if calendar_error:
+        # Degrade rather than fail: the activity side is still worth reporting.
+        report["calendar_unavailable"] = calendar_error
+        report["note"] = (
+            "the Garmin calendar could not be read, so only recorded activities are shown"
+        )
+
+    log.info("tool.plan_adherence", week=monday.isoformat(), planned=len(planned_by_date))
+    return report

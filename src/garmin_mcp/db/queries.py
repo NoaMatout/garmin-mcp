@@ -469,3 +469,36 @@ def get_laps_by_step(
         entry = dict(zip(columns, row, strict=True))
         grouped.setdefault(int(entry["wkt_step_index"]), []).append(entry)
     return grouped
+
+
+def activities_with_plan_flag(
+    conn: duckdb.DuckDBPyConnection,
+    since: date,
+    until: date,
+) -> list[dict[str, Any]]:
+    """Activities in a date range, each saying whether it carries a prescription.
+
+    The flag is what makes calendar adherence possible: an activity recorded on
+    a day something was scheduled, but with no `workout_steps`, was not started
+    from that workout — the watch never received it, or the athlete ran free.
+    Either way the step-by-step comparison is unavailable and the report should
+    say so rather than reporting nothing.
+    """
+    result = conn.execute(
+        f"""
+        SELECT {_SUMMARY_COLUMNS},
+               EXISTS (SELECT 1 FROM workout_steps w
+                       WHERE w.activity_id = v.activity_id) AS has_plan
+        FROM v_activity_summary v
+        WHERE parent_activity_id IS NULL
+          AND start_time_local >= ?
+          AND start_time_local < ?
+        ORDER BY start_time_local
+        """,
+        [
+            datetime.combine(since, datetime.min.time()),
+            datetime.combine(until, datetime.max.time()),
+        ],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]

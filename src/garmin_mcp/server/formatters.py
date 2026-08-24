@@ -380,7 +380,8 @@ def compare_to_plan(
             block["reps"] = [
                 {"rep": i + 1, **_executed_lap(lap, sport)} for i, lap in enumerate(laps)
             ]
-            block |= _rep_aggregate(laps, sport)
+            block |= _rep_aggregate(laps, sport, step.get("intensity"))
+            block |= _conformity(laps, step)
         elif laps:
             block["executed"] = _merge_laps(laps, sport)
             if len(laps) > 1:
@@ -425,29 +426,87 @@ def _merge_laps(laps: list[dict[str, Any]], sport: str | None) -> dict[str, Any]
     )
 
 
-def _rep_aggregate(laps: list[dict[str, Any]], sport: str | None) -> dict[str, Any]:
-    """The numbers a coach reads first: average, spread, and drift."""
+# Steps where the athlete is working, and where slowing down across the set
+# means something went wrong. Recovery and rest are excluded: slowing down
+# there is normal, often deliberate.
+_WORK_INTENSITIES = frozenset({"active", "interval"})
+
+
+def _halves(values: list[float]) -> tuple[float, float] | None:
+    """Mean of the first and second half of a set, for trend detection."""
+    if len(values) < 4:
+        return None
+    half = len(values) // 2
+    return sum(values[:half]) / half, sum(values[half:]) / (len(values) - half)
+
+
+def _rep_aggregate(
+    laps: list[dict[str, Any]], sport: str | None, intensity: str | None = None
+) -> dict[str, Any]:
+    """The numbers a coach reads first — different ones per kind of step.
+
+    On work steps: average, spread, and pace drift, because a summary average
+    hides the difference between holding 3:43 throughout and fading 3:35 to
+    3:52.
+
+    On recovery steps: heart-rate trend instead. Pace drift there is
+    meaningless — with 45 seconds between 400s the athlete is deliberately not
+    recovering, and calling that "faded" reads as a failure when it is the
+    design of the session. What actually carries information is whether heart
+    rate came down between reps or climbed.
+    """
     speeds = [lap["avg_speed_mps"] for lap in laps if lap.get("avg_speed_mps")]
     if not speeds or is_cycling(sport):
         return {}
 
     paces = [1000.0 / s for s in speeds]
-    average = sum(paces) / len(paces)
     result: dict[str, Any] = {
-        "avg_pace": format_pace(average),
+        "avg_pace": format_pace(sum(paces) / len(paces)),
         "fastest": format_pace(min(paces)),
         "slowest": format_pace(max(paces)),
     }
 
-    # Drift across the set is the thing a summary average hides: holding 3:43
-    # throughout and fading from 3:35 to 3:52 average the same.
-    if len(paces) >= 4:
-        half = len(paces) // 2
-        first = sum(paces[:half]) / half
-        second = sum(paces[half:]) / (len(paces) - half)
-        drift = round(second - first)
-        result["drift_s_per_km"] = drift
-        result["drift_verdict"] = (
-            "held" if abs(drift) <= 2 else "faded" if drift > 0 else "negative split"
+    is_work = intensity is None or intensity in _WORK_INTENSITIES
+
+    if is_work:
+        if (halves := _halves(paces)) is not None:
+            drift = round(halves[1] - halves[0])
+            result["drift_s_per_km"] = drift
+            result["drift_verdict"] = (
+                "held" if abs(drift) <= 2 else "faded" if drift > 0 else "negative split"
+            )
+        return result
+
+    # Recovery: how well the athlete came back down, not how fast they jogged.
+    rates = [lap["avg_heart_rate"] for lap in laps if lap.get("avg_heart_rate")]
+    if (halves := _halves([float(r) for r in rates])) is not None:
+        climb = round(halves[1] - halves[0])
+        result["hr_trend_bpm"] = climb
+        result["recovery_quality"] = (
+            "stable" if abs(climb) <= 2 else "incomplete" if climb > 0 else "improving"
         )
     return result
+
+
+def _conformity(laps: list[dict[str, Any]], step: dict[str, Any]) -> dict[str, Any]:
+    """Which reps fell short of what was asked.
+
+    Counting reps only reports presence. A recovery run for 60 of a prescribed
+    90 seconds still reads as "4 of 4 completed", which is not what a coach is
+    being told. Only work and recovery are checked — warm-up and cool-down are
+    the athlete's own business.
+    """
+    kind, target = step.get("duration_type"), step.get("duration_value")
+    if not target or kind not in ("time", "distance"):
+        return {}
+
+    field = "total_timer_time_s" if kind == "time" else "total_distance_m"
+    short = [index + 1 for index, lap in enumerate(laps) if (lap.get(field) or 0) < target * 0.9]
+    if not short:
+        return {}
+
+    # Cutting the final recovery to start the cool-down is routine and not
+    # worth flagging as a shortfall.
+    if short == [len(laps)]:
+        return {"note_last_rep": "the last rep was cut short, which is common"}
+    return {"short_reps": short, "prescribed_each": _prescription(step)}

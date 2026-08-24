@@ -177,3 +177,148 @@ class TestTool:
 
         with pytest.raises(ActivityNotFoundError):
             tools.compare_to_plan(999999)
+
+
+class TestVerdictsPerStepKind:
+    """A recovery is not a failed interval.
+
+    With 45 seconds between 400s the athlete is deliberately not recovering,
+    so reporting the recoveries as "faded" reads as a contre-performance when
+    it is the design of the session. Observed on a real week.
+    """
+
+    def test_work_steps_get_a_pace_drift_verdict(self) -> None:
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, _laps([4.7] * 6 + [4.1] * 6))
+        assert result["blocks"][1]["drift_verdict"] == "faded"
+
+    def test_recovery_steps_get_no_pace_verdict(self) -> None:
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, _laps([4.5] * 12))
+        recovery = result["blocks"][2]
+        assert "drift_verdict" not in recovery
+        assert "drift_s_per_km" not in recovery
+
+    def test_recovery_reports_heart_rate_trend_instead(self) -> None:
+        """What carries information there is whether HR came back down."""
+        laps = _laps([4.5] * 12)
+        for index, lap in enumerate(laps[2]):
+            lap["avg_heart_rate"] = 170 + index  # climbing through the set
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, laps)
+        recovery = result["blocks"][2]
+        assert recovery["hr_trend_bpm"] > 2
+        assert recovery["recovery_quality"] == "incomplete"
+
+    def test_a_recovery_that_comes_back_down_reads_as_improving(self) -> None:
+        laps = _laps([4.5] * 12)
+        for index, lap in enumerate(laps[2]):
+            lap["avg_heart_rate"] = 185 - index
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, laps)
+        assert result["blocks"][2]["recovery_quality"] == "improving"
+
+
+class TestConformity:
+    """Counting reps reports presence, not whether they were done as asked."""
+
+    def test_a_short_rep_in_the_middle_is_flagged(self) -> None:
+        laps = _laps([4.5] * 12)
+        laps[1][5]["total_timer_time_s"] = 20.0  # prescribed 60
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, laps)
+        assert result["blocks"][1]["short_reps"] == [6]
+
+    def test_only_the_last_rep_short_is_normal_not_a_shortfall(self) -> None:
+        # Cutting the final recovery to start the cool-down is routine.
+        laps = _laps([4.5] * 12)
+        laps[2][-1]["total_timer_time_s"] = 30.0
+        recovery = formatters.compare_to_plan(ACTIVITY, PLAN, laps)["blocks"][2]
+        assert "short_reps" not in recovery
+        assert "cut short" in recovery["note_last_rep"]
+
+    def test_warmup_and_cooldown_are_never_flagged(self) -> None:
+        """The athlete does what they like around the session."""
+        laps = _laps([4.5] * 12)
+        laps[0] = [_lap(0, 0, 3.2, 60.0)]  # 1 min instead of the prescribed 20
+        laps[4] = [_lap(4, 90, 3.3, 60.0)]
+        result = formatters.compare_to_plan(ACTIVITY, PLAN, laps)
+        assert "short_reps" not in result["blocks"][0]
+        assert "short_reps" not in result["blocks"][3]
+
+
+class TestCalendarAdherence:
+    """Planned against done, at the level of the week rather than the session.
+
+    Found in real use: a session was scheduled, the athlete ran it almost
+    exactly as written, but the workout never reached the watch over Bluetooth
+    so he started a free run instead. Every fact needed to say so was present;
+    nothing said it. `compare_to_plan` simply answered "no plan".
+    """
+
+    @pytest.fixture
+    def db(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Settings:
+        from datetime import UTC, datetime
+
+        init_database(settings)
+        (settings.inbox_dir / "run.fit").write_bytes(
+            fit_builder.build_run(start=datetime(2026, 3, 17, 7, 30, tzinfo=UTC))
+        )
+        import_inbox(settings)
+        monkeypatch.setattr(tools, "_settings", lambda: settings)
+        return settings
+
+    def _calendar(self, monkeypatch: pytest.MonkeyPatch, entries: list[dict[str, Any]]) -> None:
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda *_a, **_k: {"scheduled": entries},
+        )
+
+    def test_a_session_run_free_is_reported_not_lost(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._calendar(
+            monkeypatch,
+            [{"date": "2026-03-17", "name": "Tempo 3x2km", "sport": "running"}],
+        )
+        report = tools.plan_adherence("2026-03-17")
+
+        assert report["completed_off_plan"] == 1
+        day = report["days"][0]
+        assert day["status"] == "completed_off_plan"
+        assert day["planned"] == "Tempo 3x2km"
+        assert "not started from the scheduled workout" in day["note"]
+
+    def test_a_planned_day_with_nothing_recorded_is_missed(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._calendar(
+            monkeypatch,
+            [{"date": "2026-03-19", "name": "Long run", "sport": "running"}],
+        )
+        report = tools.plan_adherence("2026-03-17")
+        assert report["missed"] == 1
+        assert report["days"][0]["status"] == "missed"
+
+    def test_an_activity_with_nothing_planned_is_not_an_error(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Strength sessions the coach never scheduled should not read as noise.
+        self._calendar(monkeypatch, [])
+        report = tools.plan_adherence("2026-03-17")
+        assert report["planned"] == 0
+        assert len(report["unplanned_activities"]) == 1
+
+    def test_the_week_is_snapped_to_its_monday(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._calendar(monkeypatch, [])
+        for day in ("2026-03-16", "2026-03-19", "2026-03-22"):
+            assert tools.plan_adherence(day)["week_start"] == "2026-03-16"
+
+    def test_an_unreachable_calendar_degrades_rather_than_fails(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The activity side is still worth reporting on its own."""
+        monkeypatch.setattr(
+            "garmin_mcp.ingest.worker.request_workout",
+            lambda *_a, **_k: {"error": "no ingest worker is running"},
+        )
+        report = tools.plan_adherence("2026-03-17")
+        assert "calendar_unavailable" in report
+        assert len(report["unplanned_activities"]) == 1

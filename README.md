@@ -6,7 +6,7 @@
 
 Ask questions about your Garmin training history in plain language, from
 Claude — and send structured sessions back to your watch. Raw FIT files in,
-DuckDB out, fifteen typed MCP tools on top.
+DuckDB out, sixteen typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -64,7 +64,7 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │  15 typed tools, no     │
+              │  16 typed tools, no     │
               │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
@@ -136,6 +136,7 @@ uv run garmin-mcp sync --limit 50
 | `weekly_summary` | Per-sport totals for one week | one week |
 | `compare_activities` | Two activities with deltas computed | fixed |
 | `compare_to_plan` | A session against the workout it was run from | fixed |
+| `plan_adherence` | A week's plan against what was actually done | one week |
 | `database_status` | What is stored, worker health, reachability | fixed |
 | `sync_now` | Pull new activities without leaving the chat | needs the worker |
 | `list_workouts` | Saved sessions in your Garmin library, with their ids | 20 by default, 100 max |
@@ -314,8 +315,8 @@ transaction.
 ## Testing
 
 ```bash
-make test        # 202 tests, hermetic — no data, no network
-make test-all    # 246 tests, adds validation against real recordings
+make test        # 214 tests, hermetic — no data, no network
+make test-all    # 258 tests, adds validation against real recordings
 ```
 
 The committed suite is entirely synthetic. `fitdecode` only reads FIT files, so
