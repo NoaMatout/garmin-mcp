@@ -41,6 +41,11 @@ Two things worth knowing about the data:
   together with list_activities or weekly_summary when a question is about
   recovery or load, not sport data alone. It only holds a rolling recent
   window (see database_status for how far back it goes), not full history.
+* list_courses and get_course_profile read saved routes (Garmin's "courses"),
+  not activities — a course is a plan with a distance and elevation profile
+  but nothing executed. Use these for pacing or nutrition planning around a
+  future session; an activity later run from a course is a separate,
+  unlinked record.
 
 If a query returns nothing, call database_status before concluding an activity
 does not exist — the database may simply be empty or still syncing.
@@ -71,6 +76,8 @@ def create_server() -> MCPServer:
         tools.get_activity_streams,
         tools.weekly_summary,
         tools.sleep_history,
+        tools.list_courses,
+        tools.get_course_profile,
         tools.compare_activities,
         tools.compare_to_plan,
         tools.plan_adherence,
@@ -86,7 +93,7 @@ def create_server() -> MCPServer:
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=17)
+    log.info("server.created", tools=19)
     return mcp
 
 
@@ -98,6 +105,8 @@ def tool_names() -> list[str]:
         "get_activity_streams",
         "weekly_summary",
         "sleep_history",
+        "list_courses",
+        "get_course_profile",
         "compare_activities",
         "compare_to_plan",
         "plan_adherence",

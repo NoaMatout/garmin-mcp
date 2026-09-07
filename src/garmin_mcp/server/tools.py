@@ -253,6 +253,104 @@ def sleep_history(
     }
 
 
+def _round_or_none(value: Any, digits: int = 0) -> Any:
+    return round(value, digits) if isinstance(value, int | float) else None
+
+
+def _course_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "course_id": row["course_id"],
+        "name": row.get("name"),
+        "sport": row.get("sport"),
+        "distance_km": _round_or_none((row.get("distance_m") or 0) / 1000, 2) or None,
+        "elevation_gain_m": _round_or_none(row.get("elevation_gain_m")),
+        "elevation_loss_m": _round_or_none(row.get("elevation_loss_m")),
+    }
+
+
+def list_courses(
+    activity_type: str | None = None, limit: int = DEFAULT_LIST_LIMIT
+) -> dict[str, Any]:
+    """List saved courses (Garmin's term for a route imported ahead of time).
+
+    Args:
+        activity_type: Filter by sport, e.g. "trail_running".
+        limit: Maximum courses to return (default 20, capped at 200).
+
+    A course is a plan, not a run — it has a distance and an elevation
+    profile but no heart rate, no pace, nothing executed. Use
+    get_course_profile for the terrain shape and any named waypoints (aid
+    stations, summits) on one of them.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+
+    with reading(_settings()) as conn:
+        rows = queries.list_courses(conn, sport=activity_type, limit=limit)
+
+    def _summarize(row: dict[str, Any]) -> dict[str, Any]:
+        return _course_summary(row) | {
+            "favorite": row.get("favorite") or None,
+            "geometry_synced": row.get("has_geometry"),
+        }
+
+    log.info("tool.list_courses", returned=len(rows))
+    return {"count": len(rows), "courses": [_summarize(row) for row in rows]}
+
+
+def get_course_profile(course_id: int, max_points: int = 100) -> dict[str, Any]:
+    """One course's terrain profile and named waypoints — for planning a
+    session or a fuelling strategy around it, not for anything already run.
+
+    Args:
+        course_id: The course's id, as returned by list_courses.
+        max_points: How many points in the elevation profile (default 100).
+
+    Waypoints carry a cumulative distance from the start, so lining them up
+    against an estimated pace gives a segment-by-segment plan — how long
+    until the next aid station, and how far apart the unsupported stretches
+    are.
+    """
+    course_id = int(course_id)
+    max_points = max(2, min(int(max_points), MAX_STREAM_POINTS))
+
+    with reading(_settings()) as conn:
+        row = queries.get_course(conn, course_id)
+        if row is None:
+            raise ValueError(f"course {course_id} not found — check the id with list_courses")
+        waypoints = queries.get_course_waypoints(conn, course_id)
+        total_points = queries.count_course_points(conn, course_id)
+        profile = queries.get_course_profile(conn, course_id, max_points=max_points)
+
+    result: dict[str, Any] = _course_summary(row)
+
+    if total_points == 0:
+        result["note"] = "geometry not synced yet for this course — due on the next sync cycle"
+        return result
+
+    result["profile"] = {
+        "distance_km": [
+            _round_or_none(d / 1000, 3) if d is not None else None for d in profile["distance_m"]
+        ],
+        "elevation_m": [_round_or_none(e) for e in profile["elevation_m"]],
+    }
+    result["points_shown"] = len(profile["distance_m"])
+    result["points_total"] = total_points
+
+    if waypoints:
+        result["waypoints"] = [
+            {
+                "name": w.get("name"),
+                "type": w.get("point_type"),
+                "distance_km": _round_or_none((w.get("distance_m") or 0) / 1000, 2),
+                "elevation_m": _round_or_none(w.get("elevation_m")),
+            }
+            for w in waypoints
+        ]
+
+    log.info("tool.get_course_profile", course_id=course_id, waypoints=len(waypoints))
+    return result
+
+
 def compare_activities(id_a: int, id_b: int) -> dict[str, Any]:
     """Compare two activities side by side, with the differences computed.
 

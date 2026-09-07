@@ -281,6 +281,65 @@ class SleepSession:
 
 
 @dataclass(slots=True)
+class CourseTrackPoint:
+    """One GPS point of a saved course's route, in recording order."""
+
+    point_index: int
+    lat: float | None = None
+    lon: float | None = None
+    elevation_m: float | None = None
+    distance_m: float | None = None  # cumulative from the course start
+
+
+@dataclass(slots=True)
+class CourseWaypoint:
+    """A named point on a course — an aid station, a summit, a turn to watch.
+
+    Garmin calls these `coursePoints`; renamed here because "course point"
+    reads as a synonym for the track points above, and the two are unrelated
+    (a waypoint is authored by hand, a track point is one of a thousand GPS
+    fixes).
+    """
+
+    waypoint_index: int
+    name: str | None = None
+    point_type: str | None = None  # GENERIC | SUMMIT | AID_STATION | ...
+    distance_m: float | None = None  # cumulative from the course start
+    lat: float | None = None
+    lon: float | None = None
+    elevation_m: float | None = None
+
+
+@dataclass(slots=True)
+class Course:
+    """A saved route (Garmin: a "course") — a plan to run, not a run itself.
+
+    Distinct from `Activity` in kind, not just in state: nothing here was
+    ever executed by the athlete. It has no heart rate, no pace, no laps —
+    only the geometry someone (the athlete, or whoever the GPX came from)
+    laid out in advance. An activity later run from it is a separate row,
+    linked by nothing in this database, because Garmin's course API gives no
+    such link either.
+    """
+
+    course_id: int
+    name: str | None = None
+    sport: str | None = None  # trail_running | running | cycling | ...
+    distance_m: float | None = None
+    elevation_gain_m: float | None = None
+    elevation_loss_m: float | None = None
+    start_lat: float | None = None
+    start_lon: float | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    favorite: bool = False
+
+    track: list[CourseTrackPoint] = field(default_factory=list)
+    waypoints: list[CourseWaypoint] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ActivityStub:
     """Lightweight activity descriptor returned by a remote source.
 

@@ -209,6 +209,56 @@ CREATE TABLE IF NOT EXISTS sleep_sessions (
     extra                   JSON
 );
 
+-- ─── Courses ──────────────────────────────────────────────────────────
+-- Saved routes ("courses" in Garmin's own vocabulary): a plan to run, not a
+-- run itself. Reached through course-service, an endpoint no Python client
+-- documents — see garmin/course_reader.py for how that was confirmed. Static
+-- once created from the athlete's side, so unlike activities and sleep this
+-- is fetched once per course, not refreshed on a rolling window.
+CREATE TABLE IF NOT EXISTS courses (
+    course_id            BIGINT PRIMARY KEY,
+    name                  VARCHAR,
+    sport                 VARCHAR,       -- trail_running | running | cycling | ...
+    distance_m            DOUBLE,
+    elevation_gain_m       DOUBLE,
+    elevation_loss_m       DOUBLE,
+    start_lat              DOUBLE,
+    start_lon              DOUBLE,
+    created_at             TIMESTAMPTZ,
+    updated_at             TIMESTAMPTZ,
+    favorite               BOOLEAN,
+
+    ingested_at            TIMESTAMPTZ NOT NULL,
+    extra                   JSON
+);
+
+-- One row per GPS fix along the route. Ordinary table size for a trail
+-- course (hundreds to a couple thousand points) — nowhere near `records`
+-- territory, so a composite primary key costs nothing here.
+CREATE TABLE IF NOT EXISTS course_points (
+    course_id     BIGINT  NOT NULL,
+    point_index   INTEGER NOT NULL,
+    lat            DOUBLE,
+    lon            DOUBLE,
+    elevation_m    DOUBLE,
+    distance_m     DOUBLE,   -- cumulative from the course start
+    PRIMARY KEY (course_id, point_index)
+);
+
+-- Named points the course's author placed by hand — an aid station, a
+-- summit, a turn worth flagging. What a nutrition or pacing plan hangs off.
+CREATE TABLE IF NOT EXISTS course_waypoints (
+    course_id       BIGINT  NOT NULL,
+    waypoint_index  INTEGER NOT NULL,
+    name             VARCHAR,
+    point_type       VARCHAR,
+    distance_m       DOUBLE,   -- cumulative from the course start
+    lat              DOUBLE,
+    lon              DOUBLE,
+    elevation_m      DOUBLE,
+    PRIMARY KEY (course_id, waypoint_index)
+);
+
 CREATE INDEX IF NOT EXISTS idx_records_activity_ts ON records (activity_id, ts);
 CREATE INDEX IF NOT EXISTS idx_activities_start    ON activities (start_time_local);
 CREATE INDEX IF NOT EXISTS idx_activities_parent   ON activities (parent_activity_id);

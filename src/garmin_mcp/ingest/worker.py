@@ -45,9 +45,11 @@ from garmin_mcp.errors import (
     WorkerUnavailableError,
 )
 from garmin_mcp.ingest.pipeline import (
+    CourseSyncReport,
     IngestReport,
     SleepSyncReport,
     import_inbox,
+    sync_courses_from_garmin,
     sync_from_garmin,
     sync_sleep_from_garmin,
 )
@@ -356,6 +358,15 @@ class IngestWorker:
                 log.exception("worker.sleep_sync_failed")
                 outcome["sleep_error"] = str(exc)
 
+            try:
+                outcome["courses"] = _course_report_dict(self._sync_courses())
+            except GarminError as exc:
+                log.warning("worker.course_sync_unavailable", error=str(exc))
+                outcome["courses_error"] = str(exc)
+            except Exception as exc:
+                log.exception("worker.course_sync_failed")
+                outcome["courses_error"] = str(exc)
+
         return outcome
 
     def _sync_garmin(self, *, limit: int | None) -> IngestReport:
@@ -370,6 +381,9 @@ class IngestWorker:
 
     def _sync_sleep(self) -> SleepSyncReport:
         return sync_sleep_from_garmin(self.settings)
+
+    def _sync_courses(self) -> CourseSyncReport:
+        return sync_courses_from_garmin(self.settings)
 
     def _handle_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Edit a completed activity — currently only its Notes field."""
@@ -536,6 +550,15 @@ def _report_dict(report: IngestReport) -> dict[str, Any]:
 def _sleep_report_dict(report: SleepSyncReport) -> dict[str, Any]:
     return {
         "upserted": report.upserted,
+        "failed": report.failed,
+        "summary": report.summary(),
+    }
+
+
+def _course_report_dict(report: CourseSyncReport) -> dict[str, Any]:
+    return {
+        "summaries_refreshed": report.summaries_refreshed,
+        "details_fetched": report.details_fetched,
         "failed": report.failed,
         "summary": report.summary(),
     }

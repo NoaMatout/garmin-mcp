@@ -131,6 +131,12 @@ def sleep_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     return {"nights": nights, "first_night": first, "last_night": last}
 
 
+def course_ids_with_detail(conn: duckdb.DuckDBPyConnection) -> set[int]:
+    """Courses whose geometry is already stored — the expensive fetch to skip."""
+    rows = conn.execute("SELECT DISTINCT course_id FROM course_points").fetchall()
+    return {int(row[0]) for row in rows}
+
+
 def volume_by_sport(
     conn: duckdb.DuckDBPyConnection,
     since: date | None = None,
@@ -434,6 +440,100 @@ def stream_extrema(
                 key: round(float(value), 2) for key, value in stats.items() if value is not None
             }
     return extrema
+
+
+def list_courses(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    sport: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Saved courses, newest first."""
+    sql = """
+        SELECT course_id, name, sport, distance_m, elevation_gain_m,
+               elevation_loss_m, favorite, created_at,
+               EXISTS (
+                   SELECT 1 FROM course_points p WHERE p.course_id = c.course_id
+               ) AS has_geometry
+        FROM courses c WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if sport is not None:
+        sql += " AND sport = ?"
+        params.append(sport)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def get_course(conn: duckdb.DuckDBPyConnection, course_id: int) -> dict[str, Any] | None:
+    result = conn.execute(
+        "SELECT * EXCLUDE (extra) FROM courses WHERE course_id = ?", [course_id]
+    )
+    row = result.fetchone()
+    if row is None:
+        return None
+    return dict(zip([d[0] for d in result.description], row, strict=True))
+
+
+def get_course_waypoints(
+    conn: duckdb.DuckDBPyConnection, course_id: int
+) -> list[dict[str, Any]]:
+    result = conn.execute(
+        """
+        SELECT waypoint_index, name, point_type, distance_m, elevation_m
+        FROM course_waypoints WHERE course_id = ? ORDER BY waypoint_index
+        """,
+        [course_id],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def count_course_points(conn: duckdb.DuckDBPyConnection, course_id: int) -> int:
+    return int(
+        _one(
+            conn.execute("SELECT count(*) FROM course_points WHERE course_id = ?", [course_id])
+        )[0]
+    )
+
+
+def get_course_profile(
+    conn: duckdb.DuckDBPyConnection,
+    course_id: int,
+    *,
+    max_points: int = 100,
+) -> dict[str, list[Any]]:
+    """Down-sampled distance/elevation profile — enough to read the terrain
+    shape without spending tokens on a couple thousand raw GPS points.
+
+    Elevation is averaged per bucket like `get_streams` does for activities;
+    distance takes the last value in the bucket, since it is cumulative and
+    averaging a cumulative counter is meaningless.
+    """
+    total = count_course_points(conn, course_id)
+    if total == 0:
+        return {"distance_m": [], "elevation_m": []}
+
+    bucket_size = max(1, -(-total // max_points))
+    result = conn.execute(
+        """
+        SELECT last(distance_m ORDER BY point_index) AS distance_m,
+               avg(elevation_m) AS elevation_m
+        FROM (
+            SELECT *, (row_number() OVER (ORDER BY point_index) - 1) // ? AS bucket
+            FROM course_points WHERE course_id = ?
+        )
+        GROUP BY bucket ORDER BY bucket
+        """,
+        [bucket_size, course_id],
+    )
+    columns = [d[0] for d in result.description]
+    rows = result.fetchall()
+    return {column: [row[i] for row in rows] for i, column in enumerate(columns)}
 
 
 def sleep_history(
