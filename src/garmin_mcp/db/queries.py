@@ -536,6 +536,36 @@ def get_course_profile(
     return {column: [row[i] for row in rows] for i, column in enumerate(columns)}
 
 
+def course_segment_gain(
+    conn: duckdb.DuckDBPyConnection,
+    course_id: int,
+    from_m: float,
+    to_m: float,
+) -> float:
+    """Elevation gained between two distances along a course's track.
+
+    Computed from consecutive point-to-point deltas at full resolution —
+    `get_course_profile`'s down-sampling would average away exactly the
+    short, steep climbs a fuelling plan most needs to see.
+    """
+    row = _one(
+        conn.execute(
+            """
+            WITH deltas AS (
+                SELECT distance_m,
+                       elevation_m - LAG(elevation_m) OVER (ORDER BY point_index) AS delta
+                FROM course_points WHERE course_id = ?
+            )
+            SELECT coalesce(sum(delta), 0)
+            FROM deltas
+            WHERE delta > 0 AND distance_m >= ? AND distance_m <= ?
+            """,
+            [course_id, from_m, to_m],
+        )
+    )
+    return float(row[0])
+
+
 def sleep_history(
     conn: duckdb.DuckDBPyConnection,
     *,

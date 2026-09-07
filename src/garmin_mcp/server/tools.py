@@ -15,6 +15,7 @@ processes out of each other's way.
 
 from __future__ import annotations
 
+import itertools
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -349,6 +350,154 @@ def get_course_profile(course_id: int, max_points: int = 100) -> dict[str, Any]:
 
     log.info("tool.get_course_profile", course_id=course_id, waypoints=len(waypoints))
     return result
+
+
+# Middle of the commonly cited 60-90 g/h carbohydrate range for sustained
+# endurance effort — a starting point, not a personalised figure.
+_DEFAULT_CARB_G_PER_HOUR = 65.0
+_DEFAULT_FLUID_ML_PER_KG_PER_HOUR = 7.0
+_DEFAULT_FLUID_ML_PER_HOUR = 550.0  # used only when no weight is given either
+
+# Ultra-pacing rule of thumb: a metre of climb costs roughly as much time as
+# ten metres of flat running. Used only to weight segments against each
+# other when splitting a caller-supplied duration — never to predict one.
+_VERTICAL_METRE_EQUIVALENT_M = 10.0
+
+# A course with no named waypoints still gets split into readable chunks
+# rather than reported as one giant segment; capped so a very long course
+# does not produce dozens of near-identical rows.
+_MAX_EVEN_SEGMENTS = 6
+_EVEN_SEGMENT_TARGET_M = 5000.0
+
+
+def plan_nutrition(
+    course_id: int,
+    estimated_duration_min: float,
+    weight_kg: float | None = None,
+    carb_g_per_hour: float | None = None,
+    fluid_ml_per_hour: float | None = None,
+) -> dict[str, Any]:
+    """A segment-by-segment fuelling plan for one saved course.
+
+    Args:
+        course_id: The course's id, as returned by list_courses.
+        estimated_duration_min: How long the athlete expects to take.
+            Supplied by the caller, not derived here — trail pace depends on
+            fitness, conditions and terrain in ways this has no way to know.
+            This tool distributes a duration already estimated; it does not
+            predict one.
+        weight_kg: Sizes the default fluid rate (ml/kg/h). Ignored if
+            fluid_ml_per_hour is given explicitly.
+        carb_g_per_hour: Defaults to 65 g/h, the middle of the commonly
+            cited 60-90 g/h range for sustained endurance effort.
+        fluid_ml_per_hour: Defaults to 7 ml/kg/h when weight_kg is given,
+            otherwise a flat 550 ml/h.
+
+    Segments are the stretches between named waypoints (aid stations) when
+    the course has any, or even chunks otherwise. Time — and so fuel — is
+    split between segments by effort, not raw distance: each metre of climb
+    counts as roughly ten metres of flat running, a common ultra-pacing
+    heuristic. That makes the segment durations relative weights on a real
+    total, not a predicted split time — a plan to adjust on the ground, not
+    a prescription.
+    """
+    course_id = int(course_id)
+    duration_min = float(estimated_duration_min)
+    if duration_min <= 0:
+        raise ValueError("estimated_duration_min must be positive")
+
+    carb_rate = carb_g_per_hour if carb_g_per_hour is not None else _DEFAULT_CARB_G_PER_HOUR
+    if fluid_ml_per_hour is not None:
+        fluid_rate = float(fluid_ml_per_hour)
+    elif weight_kg is not None:
+        fluid_rate = float(weight_kg) * _DEFAULT_FLUID_ML_PER_KG_PER_HOUR
+    else:
+        fluid_rate = _DEFAULT_FLUID_ML_PER_HOUR
+
+    with reading(_settings()) as conn:
+        row = queries.get_course(conn, course_id)
+        if row is None:
+            raise ValueError(f"course {course_id} not found — check the id with list_courses")
+        total_points = queries.count_course_points(conn, course_id)
+        if total_points == 0:
+            raise ValueError(f"course {course_id} has no geometry synced yet")
+
+        total_distance_m = row.get("distance_m") or 0.0
+        waypoints = queries.get_course_waypoints(conn, course_id)
+        waypoint_names = {
+            w["distance_m"]: w.get("name")
+            for w in waypoints
+            if w.get("distance_m") is not None
+        }
+
+        boundaries = sorted(d for d in waypoint_names if 0 < d < total_distance_m)
+        if not boundaries:
+            raw_chunks = round(total_distance_m / _EVEN_SEGMENT_TARGET_M) or 1
+            chunks = max(1, min(_MAX_EVEN_SEGMENTS, raw_chunks))
+            step = total_distance_m / chunks
+            boundaries = [step * i for i in range(1, chunks)]
+
+        edges = [0.0, *boundaries, total_distance_m]
+        segments = [
+            {
+                "start_m": start,
+                "end_m": end,
+                "distance_m": end - start,
+                "gain_m": queries.course_segment_gain(conn, course_id, start, end),
+                "aid_station": waypoint_names.get(end),
+            }
+            for start, end in itertools.pairwise(edges)
+        ]
+
+    total_effort = sum(
+        s["distance_m"] + s["gain_m"] * _VERTICAL_METRE_EQUIVALENT_M for s in segments
+    )
+    if total_effort <= 0:
+        raise ValueError(f"course {course_id} has no measurable distance to plan around")
+
+    cumulative_min = 0.0
+    plan = []
+    for s in segments:
+        effort = s["distance_m"] + s["gain_m"] * _VERTICAL_METRE_EQUIVALENT_M
+        seg_duration_min = duration_min * (effort / total_effort)
+        cumulative_min += seg_duration_min
+        hours = seg_duration_min / 60
+
+        entry: dict[str, Any] = {
+            "segment_km": f"{s['start_m'] / 1000:.1f}–{s['end_m'] / 1000:.1f}",
+            "gain_m": round(s["gain_m"]) if s["gain_m"] else None,
+            "duration_min": round(seg_duration_min),
+            "cumulative_min": round(cumulative_min),
+            "carbs_g": round(carb_rate * hours),
+            "fluid_ml": round(fluid_rate * hours),
+        }
+        if s["aid_station"]:
+            entry["aid_station"] = s["aid_station"]
+        elif seg_duration_min > 60:
+            entry["unsupported"] = "no known aid station on this stretch — carry it"
+        plan.append({k: v for k, v in entry.items() if v is not None})
+
+    total_hours = duration_min / 60
+    log.info("tool.plan_nutrition", course_id=course_id, segments=len(plan))
+    return {
+        "course_id": course_id,
+        "name": row.get("name"),
+        "distance_km": round(total_distance_m / 1000, 2),
+        "estimated_duration_min": round(duration_min),
+        "rates_used": {"carb_g_per_hour": carb_rate, "fluid_ml_per_hour": round(fluid_rate)},
+        "totals": {
+            "carbs_g": round(carb_rate * total_hours),
+            "fluid_ml": round(fluid_rate * total_hours),
+            "gels_25g_equivalent": round(carb_rate * total_hours / 25, 1),
+            "bottles_500ml_equivalent": round(fluid_rate * total_hours / 500, 1),
+        },
+        "segments": plan,
+        "note": (
+            "segments are weighted by effort (climb counted as ~10x flat distance), "
+            "not measured pace — durations are relative splits of your own duration "
+            "estimate, not a predicted finish time"
+        ),
+    }
 
 
 def compare_activities(id_a: int, id_b: int) -> dict[str, Any]:

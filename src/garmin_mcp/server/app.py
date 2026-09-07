@@ -78,6 +78,7 @@ def create_server() -> MCPServer:
         tools.sleep_history,
         tools.list_courses,
         tools.get_course_profile,
+        tools.plan_nutrition,
         tools.compare_activities,
         tools.compare_to_plan,
         tools.plan_adherence,
@@ -93,7 +94,7 @@ def create_server() -> MCPServer:
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=19)
+    log.info("server.created", tools=20)
     return mcp
 
 
@@ -107,6 +108,7 @@ def tool_names() -> list[str]:
         "sleep_history",
         "list_courses",
         "get_course_profile",
+        "plan_nutrition",
         "compare_activities",
         "compare_to_plan",
         "plan_adherence",

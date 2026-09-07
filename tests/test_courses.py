@@ -333,3 +333,195 @@ class TestServerTools:
         self._seed(db, monkeypatch)
         with pytest.raises(ValueError, match="not found"):
             tools.get_course_profile(999)
+
+
+def _write_course_with_profile(
+    settings: Settings,
+    course_id: int,
+    *,
+    distance_m: float,
+    points: list[tuple[float, float]],  # (distance_m, elevation_m)
+    waypoints: list[tuple[str, float]] = (),  # (name, distance_m)  # type: ignore[assignment]
+) -> None:
+    """Build a course with a controlled profile, bypassing the parser.
+
+    Used only by the nutrition-plan tests, which need to know the exact
+    elevation gain a segment should compute to, not just that parsing round-
+    trips correctly (already covered by TestCourseParser).
+    """
+    from garmin_mcp.domain.models import Course, CourseTrackPoint, CourseWaypoint
+
+    course = Course(course_id=course_id, name=f"Course {course_id}", distance_m=distance_m)
+    course.track = [
+        CourseTrackPoint(point_index=i, elevation_m=elevation, distance_m=distance)
+        for i, (distance, elevation) in enumerate(points)
+    ]
+    course.waypoints = [
+        CourseWaypoint(waypoint_index=i, name=name, distance_m=distance)
+        for i, (name, distance) in enumerate(waypoints)
+    ]
+    with duckdb.connect(str(settings.db_path)) as conn:
+        write_course_summary(conn, course)
+        write_course_detail(conn, course)
+
+
+class TestNutritionPlan:
+    def test_splits_at_named_waypoints_and_sizes_by_effort(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        # 0-3km: +100m climb. 3-6km: flat. A pure-distance split would give
+        # both segments equal time; the climb must pull more of it.
+        _write_course_with_profile(
+            db,
+            1,
+            distance_m=6000.0,
+            points=[(0, 1000), (1000, 1033), (2000, 1066), (3000, 1100), (6000, 1100)],
+            waypoints=[("Ravito 1", 3000.0)],
+        )
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=60, weight_kg=78)
+
+        assert len(result["segments"]) == 2
+        climb, flat = result["segments"]
+        assert climb["aid_station"] == "Ravito 1"
+        # effort: climb = 3000 + 100*10 = 4000; flat = 3000 + 0 = 3000
+        assert climb["duration_min"] > flat["duration_min"]
+        assert climb["duration_min"] + flat["duration_min"] == pytest.approx(60, abs=1)
+
+    def test_falls_back_to_even_chunks_without_waypoints(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(
+            db, 1, distance_m=12000.0, points=[(0, 1000), (12000, 1000)], waypoints=[]
+        )
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=60)
+
+        assert len(result["segments"]) > 1
+        assert all("aid_station" not in s for s in result["segments"])
+
+    def test_fluid_rate_defaults_from_weight(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=60, weight_kg=100)
+
+        assert result["rates_used"]["fluid_ml_per_hour"] == 700  # 100kg * 7ml/kg/h
+
+    def test_fluid_rate_falls_back_to_flat_default_without_weight(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=60)
+
+        assert result["rates_used"]["fluid_ml_per_hour"] == 550
+
+    def test_explicit_fluid_rate_overrides_weight(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(
+            1, estimated_duration_min=60, weight_kg=78, fluid_ml_per_hour=900
+        )
+
+        assert result["rates_used"]["fluid_ml_per_hour"] == 900
+
+    def test_totals_scale_with_duration(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        one_hour = tools.plan_nutrition(1, estimated_duration_min=60)
+        two_hours = tools.plan_nutrition(1, estimated_duration_min=120)
+
+        expected = 2 * one_hour["totals"]["carbs_g"]
+        assert two_hours["totals"]["carbs_g"] == pytest.approx(expected, abs=1)
+
+    def test_flags_a_long_stretch_with_no_aid_station(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        # One waypoint near the start; the rest of a long course is unsupported.
+        _write_course_with_profile(
+            db,
+            1,
+            distance_m=20000.0,
+            points=[(0, 1000), (20000, 1200)],
+            waypoints=[("Ravito", 1000.0)],
+        )
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=180)
+
+        long_segment = result["segments"][-1]
+        assert "unsupported" in long_segment
+
+    def test_a_short_segment_is_not_flagged_unsupported(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(
+            db,
+            1,
+            distance_m=5000.0,
+            points=[(0, 1000), (5000, 1000)],
+            waypoints=[("Ravito", 4900.0)],
+        )
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=30)
+
+        assert "unsupported" not in result["segments"][-1]
+
+    def test_rejects_a_nonpositive_duration(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        with pytest.raises(ValueError, match="positive"):
+            tools.plan_nutrition(1, estimated_duration_min=0)
+
+    def test_unknown_course_raises(self, db: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+        from garmin_mcp.server import tools
+
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+        with pytest.raises(ValueError, match="not found"):
+            tools.plan_nutrition(999, estimated_duration_min=60)
+
+    def test_course_without_geometry_raises(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        with duckdb.connect(str(db.db_path)) as conn:
+            write_course_summary(conn, parse_course_summary(_raw_summary(1)))
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        with pytest.raises(ValueError, match="no geometry"):
+            tools.plan_nutrition(1, estimated_duration_min=60)
