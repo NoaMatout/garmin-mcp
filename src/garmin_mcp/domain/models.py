@@ -271,6 +271,12 @@ class SleepSession:
     sleep_score: int | None = None
     sleep_quality: str | None = None  # POOR | FAIR | GOOD | EXCELLENT
 
+    # Reported alongside sleep because Garmin computes them overnight, not
+    # because they are sleep metrics themselves — useful recovery context.
+    hrv_status: str | None = None  # BALANCED | UNBALANCED | LOW | ...
+    resting_heart_rate: int | None = None
+    body_battery_change: int | None = None  # net change while asleep
+
     extra: dict[str, Any] = field(default_factory=dict)
 
 

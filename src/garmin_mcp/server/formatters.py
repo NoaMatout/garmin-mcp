@@ -147,6 +147,9 @@ def summarize_sleep(row: dict[str, Any]) -> dict[str, Any]:
             "avg_hrv_ms": _round(row.get("avg_hrv"), 0),
             "avg_spo2_pct": _round(row.get("avg_spo2"), 0),
             "avg_respiration": _round(row.get("avg_respiration"), 1),
+            "hrv_status": row.get("hrv_status"),
+            "resting_hr": row.get("resting_heart_rate"),
+            "body_battery_change": row.get("body_battery_change"),
         }
     )
 

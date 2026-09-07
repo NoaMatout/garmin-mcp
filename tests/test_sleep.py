@@ -29,6 +29,11 @@ def _raw_night(
     quality: str = "GOOD",
     start_gmt_ms: int = 1_757_130_600_000,
 ) -> dict[str, Any]:
+    """Shaped like a real response, not the (partly wrong) `garminconnect`
+    typed model: `averageRespirationValue` inside the DTO, `avgOvernightHrv`
+    at the top level — see sleep_parser's module docstring for how that was
+    found out the hard way, against a real account.
+    """
     return {
         "dailySleepDTO": {
             "sleepTimeSeconds": total_s,
@@ -41,13 +46,15 @@ def _raw_night(
             "sleepEndTimestampGMT": start_gmt_ms + total_s * 1000,
             "sleepStartTimestampLocal": start_gmt_ms + 3600 * 1000,
             "sleepEndTimestampLocal": start_gmt_ms + total_s * 1000 + 3600 * 1000,
-            "avgSleepHRV": 45.2,
-            "avgSpO2": 96.0,
-            "avgRespirationValue": 14.2,
+            "averageRespirationValue": 14.2,
             "lowestRespirationValue": 11.0,
             "highestRespirationValue": 18.0,
             "sleepScores": {"overall": {"value": score, "qualifierKey": quality}},
-        }
+        },
+        "avgOvernightHrv": 45.2,
+        "hrvStatus": "BALANCED",
+        "restingHeartRate": 47,
+        "bodyBatteryChange": 55,
     }
 
 
@@ -77,6 +84,38 @@ class TestParser:
         # Local timestamps are stored naive, matching every other *_local column.
         assert session.sleep_start_local is not None
         assert session.sleep_start_local.tzinfo is None
+
+    def test_hrv_is_read_from_the_top_level_not_the_dto(self) -> None:
+        """Regression: the first cut read `dailySleepDTO.avgSleepHRV`, which
+        does not exist against a real account — HRV lives at the response's
+        top level as `avgOvernightHrv`, and that field silently stayed None
+        for every night until this was caught by inspecting real data."""
+        session = parse_sleep(_raw_night(), date(2026, 9, 6))
+        assert session is not None
+        assert session.avg_hrv == 45.2
+        assert session.hrv_status == "BALANCED"
+
+    def test_respiration_key_has_the_missing_e(self) -> None:
+        """Regression: the DTO field is `averageRespirationValue`, not the
+        `avgRespirationValue` the typed client model — and the first cut of
+        this parser — used."""
+        session = parse_sleep(_raw_night(), date(2026, 9, 6))
+        assert session is not None
+        assert session.avg_respiration == 14.2
+
+    def test_recovery_context_fields_are_captured(self) -> None:
+        session = parse_sleep(_raw_night(), date(2026, 9, 6))
+        assert session is not None
+        assert session.resting_heart_rate == 47
+        assert session.body_battery_change == 55
+
+    def test_spo2_absent_on_a_device_without_a_pulse_ox_sensor_stays_none(self) -> None:
+        """Not every field that comes back None is a mapping bug — SpO2
+        genuinely is not in the payload for a watch with no pulse-ox sensor,
+        and the fixture reflects that rather than fabricating a value."""
+        session = parse_sleep(_raw_night(), date(2026, 9, 6))
+        assert session is not None
+        assert session.avg_spo2 is None
 
     def test_a_night_with_no_detected_sleep_is_none(self) -> None:
         assert parse_sleep({"dailySleepDTO": {"sleepTimeSeconds": None}}, date(2026, 9, 6)) is None

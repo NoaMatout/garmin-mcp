@@ -199,6 +199,12 @@ CREATE TABLE IF NOT EXISTS sleep_sessions (
     sleep_score            INTEGER,
     sleep_quality          VARCHAR,   -- POOR | FAIR | GOOD | EXCELLENT
 
+    -- Computed overnight, not sleep metrics themselves, but useful recovery
+    -- context alongside them.
+    hrv_status              VARCHAR,   -- BALANCED | UNBALANCED | LOW | ...
+    resting_heart_rate      SMALLINT,
+    body_battery_change     INTEGER,
+
     ingested_at            TIMESTAMPTZ NOT NULL,
     extra                   JSON
 );

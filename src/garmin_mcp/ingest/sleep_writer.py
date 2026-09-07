@@ -44,6 +44,9 @@ _COLUMNS = (
     "highest_respiration",
     "sleep_score",
     "sleep_quality",
+    "hrv_status",
+    "resting_heart_rate",
+    "body_battery_change",
     "ingested_at",
     "extra",
 )
@@ -70,6 +73,9 @@ def _row(session: SleepSession, ingested_at: datetime) -> tuple[Any, ...]:
         session.highest_respiration,
         session.sleep_score,
         session.sleep_quality,
+        session.hrv_status,
+        session.resting_heart_rate,
+        session.body_battery_change,
         ingested_at,
         json.dumps(session.extra, default=str) if session.extra else None,
     )

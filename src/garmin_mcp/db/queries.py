@@ -447,7 +447,8 @@ def sleep_history(
     sql = """
         SELECT calendar_date, sleep_start_local, sleep_end_local, total_sleep_s,
                nap_s, deep_sleep_s, light_sleep_s, rem_sleep_s, awake_s,
-               avg_hrv, avg_spo2, avg_respiration, sleep_score, sleep_quality
+               avg_hrv, avg_spo2, avg_respiration, sleep_score, sleep_quality,
+               hrv_status, resting_heart_rate, body_battery_change
         FROM sleep_sessions WHERE 1 = 1
     """
     params: list[Any] = []
