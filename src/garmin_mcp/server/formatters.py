@@ -125,6 +125,32 @@ def summarize_lap(lap: dict[str, Any], sport: str | None) -> dict[str, Any]:
     )
 
 
+def summarize_sleep(row: dict[str, Any]) -> dict[str, Any]:
+    """One night, in the units a person reads sleep in — hours, not seconds."""
+
+    def _clock(value: Any) -> str | None:
+        return value.strftime("%H:%M") if isinstance(value, datetime) else None
+
+    return _compact(
+        {
+            "date": _local_date(row.get("calendar_date")),
+            "duration": format_duration(row.get("total_sleep_s")),
+            "bedtime": _clock(row.get("sleep_start_local")),
+            "wake_time": _clock(row.get("sleep_end_local")),
+            "deep": format_duration(row.get("deep_sleep_s")),
+            "light": format_duration(row.get("light_sleep_s")),
+            "rem": format_duration(row.get("rem_sleep_s")),
+            "awake": format_duration(row.get("awake_s")),
+            "nap": format_duration(row.get("nap_s")),
+            "score": row.get("sleep_score"),
+            "quality": row.get("sleep_quality"),
+            "avg_hrv_ms": _round(row.get("avg_hrv"), 0),
+            "avg_spo2_pct": _round(row.get("avg_spo2"), 0),
+            "avg_respiration": _round(row.get("avg_respiration"), 1),
+        }
+    )
+
+
 def summarize_week(rows: list[dict[str, Any]], week_start: date) -> dict[str, Any]:
     """Per-sport volume for one week, plus a combined line.
 

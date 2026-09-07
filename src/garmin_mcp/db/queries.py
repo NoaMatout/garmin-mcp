@@ -123,6 +123,14 @@ def activity_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     }
 
 
+def sleep_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """Headline numbers for `database_status` — mirrors `activity_counts`."""
+    nights, first, last = _one(
+        conn.execute("SELECT count(*), min(calendar_date), max(calendar_date) FROM sleep_sessions")
+    )
+    return {"nights": nights, "first_night": first, "last_night": last}
+
+
 def volume_by_sport(
     conn: duckdb.DuckDBPyConnection,
     since: date | None = None,
@@ -426,6 +434,35 @@ def stream_extrema(
                 key: round(float(value), 2) for key, value in stats.items() if value is not None
             }
     return extrema
+
+
+def sleep_history(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Nightly sleep, most recent first."""
+    sql = """
+        SELECT calendar_date, sleep_start_local, sleep_end_local, total_sleep_s,
+               nap_s, deep_sleep_s, light_sleep_s, rem_sleep_s, awake_s,
+               avg_hrv, avg_spo2, avg_respiration, sleep_score, sleep_quality
+        FROM sleep_sessions WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if since is not None:
+        sql += " AND calendar_date >= ?"
+        params.append(since)
+    if until is not None:
+        sql += " AND calendar_date <= ?"
+        params.append(until)
+    sql += " ORDER BY calendar_date DESC LIMIT ?"
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
 
 
 def get_planned_steps(conn: duckdb.DuckDBPyConnection, activity_id: int) -> list[dict[str, Any]]:

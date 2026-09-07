@@ -172,7 +172,7 @@ def sync(
     from datetime import date as date_type
 
     from garmin_mcp.garmin.factory import resolve_source
-    from garmin_mcp.ingest.pipeline import sync_from_garmin
+    from garmin_mcp.ingest.pipeline import sync_from_garmin, sync_sleep_from_garmin
 
     settings = get_settings()
     settings.ensure_dirs()
@@ -202,10 +202,18 @@ def sync(
 
     if not report.outcomes:
         typer.secho("already up to date", fg=typer.colors.GREEN)
-        return
-    for outcome in report.outcomes:
-        typer.echo(f"  {outcome.status:<9} {outcome.name}")
-    typer.echo(report.summary())
+    else:
+        for outcome in report.outcomes:
+            typer.echo(f"  {outcome.status:<9} {outcome.name}")
+        typer.echo(report.summary())
+
+    # Same rolling-window refresh the worker does on every cycle — kept here
+    # too so a one-off CLI sync leaves sleep exactly as current as activities.
+    try:
+        sleep_report = sync_sleep_from_garmin(settings)
+        typer.echo(f"sleep: {sleep_report.summary()}")
+    except GarminMcpError as exc:
+        typer.secho(f"sleep: {exc}", fg=typer.colors.YELLOW, err=True)
 
 
 @app.command()

@@ -221,6 +221,38 @@ def weekly_summary(week_start: str | None = None) -> dict[str, Any]:
     return summary
 
 
+def sleep_history(
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict[str, Any]:
+    """List nightly sleep, most recent first — for reading alongside training load.
+
+    Args:
+        since: Only nights on or after this ISO date.
+        until: Only nights on or before this ISO date.
+        limit: Maximum nights to return (default 20, capped at 200).
+
+    Sleep is kept fresh only for a rolling recent window (see
+    database_status for how many nights are actually stored, and how far
+    back they go) — an empty result for an older date usually means it was
+    never synced, not that nothing happened that night.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    start = _parse_date(since, field="since")
+    end = _parse_date(until, field="until")
+
+    with reading(_settings()) as conn:
+        rows = queries.sleep_history(conn, since=start, until=end, limit=limit)
+
+    log.info("tool.sleep_history", returned=len(rows))
+    return {
+        "count": len(rows),
+        "filters": {k: v for k, v in {"since": since, "until": until}.items() if v},
+        "nights": [formatters.summarize_sleep(row) for row in rows],
+    }
+
+
 def compare_activities(id_a: int, id_b: int) -> dict[str, Any]:
     """Compare two activities side by side, with the differences computed.
 
@@ -276,6 +308,7 @@ def database_status() -> dict[str, Any]:
         with reading(settings) as conn:
             counts = queries.activity_counts(conn)
             sports = queries.volume_by_sport(conn)
+            sleep = queries.sleep_counts(conn)
     except DatabaseLockedError as exc:
         return {"available": False, "reason": str(exc)}
 
@@ -303,6 +336,11 @@ def database_status() -> dict[str, Any]:
         "files_failed": counts["files_failed"],
         "first_activity": _stamp(counts["first_activity"]),
         "last_activity": _stamp(counts["last_activity"]),
+        "sleep": {
+            "nights_recorded": sleep["nights"],
+            "first_night": _stamp(sleep["first_night"]),
+            "last_night": _stamp(sleep["last_night"]),
+        },
         "by_sport": [
             {"sport": sport, "activities": count, "distance_km": round(km, 1)}
             for sport, count, km in sports

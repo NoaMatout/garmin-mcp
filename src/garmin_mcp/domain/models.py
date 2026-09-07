@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 Source = Literal["garmin", "manual"]
@@ -230,6 +230,48 @@ class ParsedFit:
     @property
     def total_records(self) -> int:
         return sum(len(a.records) for a in self.activities)
+
+
+@dataclass(slots=True)
+class SleepSession:
+    """One night's sleep, from Garmin's daily-sleep summary.
+
+    Unlike an `Activity`, this has no file behind it — it comes straight from
+    an API response, refreshed on a rolling window rather than fetched once,
+    because Garmin keeps revising a night's numbers for hours after the
+    athlete wakes up. `calendar_date` is the date Garmin buckets the night
+    under, not the date it ends on.
+
+    A night the watch detected nothing for is absent from the database
+    entirely rather than stored as zeros — `sleep_parser.parse_sleep` returns
+    `None` for it, so "no row" and "no sleep" cannot be confused.
+    """
+
+    calendar_date: date
+    source: Source = "garmin"
+
+    sleep_start_utc: datetime | None = None
+    sleep_end_utc: datetime | None = None
+    sleep_start_local: datetime | None = None
+    sleep_end_local: datetime | None = None
+
+    total_sleep_s: float | None = None
+    nap_s: float | None = None
+    deep_sleep_s: float | None = None
+    light_sleep_s: float | None = None
+    rem_sleep_s: float | None = None
+    awake_s: float | None = None
+
+    avg_hrv: float | None = None
+    avg_spo2: float | None = None
+    avg_respiration: float | None = None
+    lowest_respiration: float | None = None
+    highest_respiration: float | None = None
+
+    sleep_score: int | None = None
+    sleep_quality: str | None = None  # POOR | FAIR | GOOD | EXCELLENT
+
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

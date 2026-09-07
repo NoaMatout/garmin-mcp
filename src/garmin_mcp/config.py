@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=30, ge=1)
     sync_batch_size: int = Field(default=25, ge=1, le=200)
 
+    # How many trailing nights of sleep to re-fetch on every cycle. Small on
+    # purpose: unlike activities this is a refresh, not a backfill — Garmin
+    # revises a night's numbers for hours after wake, so recent dates are
+    # re-read every cycle rather than only once. 0 turns sleep sync off.
+    sleep_sync_days: int = Field(default=3, ge=0, le=30)
+
     # ─── Writing back to Garmin ───────────────────────────────────────
     # Off by default. Reading someone's history and modifying their account
     # are different things, and cloning this repository should not hand a

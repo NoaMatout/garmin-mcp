@@ -37,6 +37,10 @@ Two things worth knowing about the data:
   triathlon.
 * Distances are in metres and speeds in metres per second in the database, but
   tools return kilometres, pace and km/h already formatted.
+* sleep_history reads nightly sleep to line up against training — use it
+  together with list_activities or weekly_summary when a question is about
+  recovery or load, not sport data alone. It only holds a rolling recent
+  window (see database_status for how far back it goes), not full history.
 
 If a query returns nothing, call database_status before concluding an activity
 does not exist — the database may simply be empty or still syncing.
@@ -66,6 +70,7 @@ def create_server() -> MCPServer:
         tools.get_activity_detail,
         tools.get_activity_streams,
         tools.weekly_summary,
+        tools.sleep_history,
         tools.compare_activities,
         tools.compare_to_plan,
         tools.plan_adherence,
@@ -81,7 +86,7 @@ def create_server() -> MCPServer:
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=16)
+    log.info("server.created", tools=17)
     return mcp
 
 
@@ -92,6 +97,7 @@ def tool_names() -> list[str]:
         "get_activity_detail",
         "get_activity_streams",
         "weekly_summary",
+        "sleep_history",
         "compare_activities",
         "compare_to_plan",
         "plan_adherence",

@@ -168,6 +168,41 @@ CREATE TABLE IF NOT EXISTS records (
     extra                   JSON
 );
 
+-- ─── Sleep ────────────────────────────────────────────────────────────
+-- One row per night, keyed by the calendar date Garmin buckets it under.
+-- Refreshed on a rolling window rather than fetched once and left alone:
+-- Garmin keeps revising a night's numbers for hours after the athlete wakes,
+-- so the ingest worker re-upserts the last few days on every sync cycle
+-- instead of only backfilling what is missing.
+CREATE TABLE IF NOT EXISTS sleep_sessions (
+    calendar_date        DATE PRIMARY KEY,
+    source                VARCHAR NOT NULL DEFAULT 'garmin',
+
+    sleep_start_utc       TIMESTAMPTZ,
+    sleep_end_utc         TIMESTAMPTZ,
+    sleep_start_local     TIMESTAMP,
+    sleep_end_local       TIMESTAMP,
+
+    total_sleep_s         DOUBLE,
+    nap_s                  DOUBLE,
+    deep_sleep_s           DOUBLE,
+    light_sleep_s          DOUBLE,
+    rem_sleep_s            DOUBLE,
+    awake_s                DOUBLE,
+
+    avg_hrv                DOUBLE,
+    avg_spo2                DOUBLE,
+    avg_respiration        DOUBLE,
+    lowest_respiration     DOUBLE,
+    highest_respiration    DOUBLE,
+
+    sleep_score            INTEGER,
+    sleep_quality          VARCHAR,   -- POOR | FAIR | GOOD | EXCELLENT
+
+    ingested_at            TIMESTAMPTZ NOT NULL,
+    extra                   JSON
+);
+
 CREATE INDEX IF NOT EXISTS idx_records_activity_ts ON records (activity_id, ts);
 CREATE INDEX IF NOT EXISTS idx_activities_start    ON activities (start_time_local);
 CREATE INDEX IF NOT EXISTS idx_activities_parent   ON activities (parent_activity_id);

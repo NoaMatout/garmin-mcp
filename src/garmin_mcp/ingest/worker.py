@@ -44,7 +44,13 @@ from garmin_mcp.errors import (
     GarminMcpError,
     WorkerUnavailableError,
 )
-from garmin_mcp.ingest.pipeline import IngestReport, import_inbox, sync_from_garmin
+from garmin_mcp.ingest.pipeline import (
+    IngestReport,
+    SleepSyncReport,
+    import_inbox,
+    sync_from_garmin,
+    sync_sleep_from_garmin,
+)
 from garmin_mcp.logging import get_logger
 
 log = get_logger(__name__)
@@ -337,6 +343,19 @@ class IngestWorker:
             log.exception("worker.sync_failed")
             outcome["garmin_error"] = str(exc)
 
+        # Skipped when the activity sync above already failed: it would hit
+        # the same broken session and fail the same way, for a second network
+        # round trip that tells nobody anything new.
+        if "garmin_error" not in outcome:
+            try:
+                outcome["sleep"] = _sleep_report_dict(self._sync_sleep())
+            except GarminError as exc:
+                log.warning("worker.sleep_unavailable", error=str(exc))
+                outcome["sleep_error"] = str(exc)
+            except Exception as exc:
+                log.exception("worker.sleep_sync_failed")
+                outcome["sleep_error"] = str(exc)
+
         return outcome
 
     def _sync_garmin(self, *, limit: int | None) -> IngestReport:
@@ -348,6 +367,9 @@ class IngestWorker:
             return sync_from_garmin(source, self.settings, limit=limit)
         finally:
             source.close()
+
+    def _sync_sleep(self) -> SleepSyncReport:
+        return sync_sleep_from_garmin(self.settings)
 
     def _handle_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Edit a completed activity — currently only its Notes field."""
@@ -507,6 +529,14 @@ def _report_dict(report: IngestReport) -> dict[str, Any]:
         "failed": report.failed,
         "activities": report.activities,
         "samples": report.records,
+        "summary": report.summary(),
+    }
+
+
+def _sleep_report_dict(report: SleepSyncReport) -> dict[str, Any]:
+    return {
+        "upserted": report.upserted,
+        "failed": report.failed,
         "summary": report.summary(),
     }
 
