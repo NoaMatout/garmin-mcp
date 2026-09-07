@@ -525,3 +525,52 @@ class TestNutritionPlan:
 
         with pytest.raises(ValueError, match="no geometry"):
             tools.plan_nutrition(1, estimated_duration_min=60)
+
+    def test_short_effort_has_no_qualitative_advice(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Texture fatigue and sweetness fatigue are ultra-distance problems —
+        a sub-3h effort should not be told to alternate salty and sweet."""
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(db, 1, distance_m=5000.0, points=[(0, 1000), (5000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=90)
+
+        assert "fueling_principles" not in result
+        assert all("texture" not in s for s in result["segments"])
+
+    def test_long_effort_gets_qualitative_advice_and_a_late_caffeine_hint(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        # Long enough to fall back to several even chunks — a single-segment
+        # course cannot show "not on the first segment, yes on the last".
+        _write_course_with_profile(db, 1, distance_m=20000.0, points=[(0, 1000), (20000, 1000)])
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=240)
+
+        assert "fueling_principles" in result
+        assert all("texture" in s for s in result["segments"])
+        # The last segment crosses the 85% mark of a 240 min effort.
+        assert "caffeine" in result["segments"][-1]
+        assert "caffeine" not in result["segments"][0]
+
+    def test_texture_progresses_from_solid_to_liquid(
+        self, db: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from garmin_mcp.server import tools
+
+        _write_course_with_profile(
+            db, 1, distance_m=15000.0, points=[(0, 1000), (15000, 1000)], waypoints=[]
+        )
+        monkeypatch.setattr(tools, "_settings", lambda: db)
+
+        result = tools.plan_nutrition(1, estimated_duration_min=240)
+
+        textures = [s["texture"] for s in result["segments"]]
+        assert textures[0].startswith("solide")
+        assert textures[-1].startswith("liquide")

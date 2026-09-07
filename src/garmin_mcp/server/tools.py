@@ -369,6 +369,28 @@ _VERTICAL_METRE_EQUIVALENT_M = 10.0
 _MAX_EVEN_SEGMENTS = 6
 _EVEN_SEGMENT_TARGET_M = 5000.0
 
+# Below this, the qualitative fuelling advice below does not apply — texture
+# fatigue and sweetness fatigue are ultra-distance problems, not relevant to
+# a 90-minute effort. Sourced from how experienced ultra runners structure
+# a real race plan (an athlete's own published UTMB/CCC nutrition breakdown,
+# shared 2026-09-07): chewable, energy-dense food early; softer, easier to
+# swallow food as fatigue sets in; salty alternated with sweet to avoid
+# sweetness fatigue; caffeine held back for when alertness actually drops
+# rather than taken from the start.
+_QUALITATIVE_ADVICE_THRESHOLD_MIN = 180.0
+
+
+def _texture_hint(fraction_complete: float) -> str:
+    if fraction_complete < 0.4:
+        return "solide (barre, fruits secs) — l'estomac tolère encore le plus dense"
+    if fraction_complete < 0.75:
+        return "mixte (gel, gommes)"
+    return "liquide/facile à avaler (gel fluide, purée) — la mâchoire et l'estomac fatiguent"
+
+
+def _flavor_hint(segment_index: int) -> str:
+    return "salé" if segment_index % 2 else "sucré"
+
 
 def plan_nutrition(
     course_id: int,
@@ -455,9 +477,10 @@ def plan_nutrition(
     if total_effort <= 0:
         raise ValueError(f"course {course_id} has no measurable distance to plan around")
 
+    long_effort = duration_min >= _QUALITATIVE_ADVICE_THRESHOLD_MIN
     cumulative_min = 0.0
     plan = []
-    for s in segments:
+    for index, s in enumerate(segments):
         effort = s["distance_m"] + s["gain_m"] * _VERTICAL_METRE_EQUIVALENT_M
         seg_duration_min = duration_min * (effort / total_effort)
         cumulative_min += seg_duration_min
@@ -475,11 +498,18 @@ def plan_nutrition(
             entry["aid_station"] = s["aid_station"]
         elif seg_duration_min > 60:
             entry["unsupported"] = "no known aid station on this stretch — carry it"
+
+        if long_effort:
+            entry["texture"] = _texture_hint(cumulative_min / duration_min)
+            entry["lean"] = _flavor_hint(index)
+            if cumulative_min / duration_min > 0.85:
+                entry["caffeine"] = "envisager si la vigilance baisse"
+
         plan.append({k: v for k, v in entry.items() if v is not None})
 
     total_hours = duration_min / 60
     log.info("tool.plan_nutrition", course_id=course_id, segments=len(plan))
-    return {
+    result: dict[str, Any] = {
         "course_id": course_id,
         "name": row.get("name"),
         "distance_km": round(total_distance_m / 1000, 2),
@@ -498,6 +528,16 @@ def plan_nutrition(
             "estimate, not a predicted finish time"
         ),
     }
+
+    if long_effort:
+        result["fueling_principles"] = [
+            "texture: solide en début d'effort, de plus en plus liquide/facile à "
+            "avaler vers la fin, quand mâcher devient dur",
+            "alterne sucré et salé pour éviter l'écœurement sur la durée",
+            "garde la caféine pour quand la vigilance baisse réellement, pas dès le départ",
+        ]
+
+    return result
 
 
 def compare_activities(id_a: int, id_b: int) -> dict[str, Any]:
