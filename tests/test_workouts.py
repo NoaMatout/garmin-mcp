@@ -614,3 +614,25 @@ class TestStrengthPayload:
     def test_the_description_reads_like_a_strength_session(self) -> None:
         spec = spec_from_dict({"name": "Upper", "sport": "strength", "blocks": STRENGTH})
         assert "4 × (interval 3 × weighted_pull_up @ 45 kg" in spec.describe()
+
+
+class TestSportCoverage:
+    def test_every_buildable_sport_can_actually_be_uploaded(self) -> None:
+        """A sport can build correctly and still have no way to be sent.
+
+        The two tables live in different modules, so adding a sport to one
+        and forgetting the other raises a bare KeyError — at the moment the
+        athlete asks for the workout, having already seen the preview.
+        """
+        from garmin_mcp.garmin.workout_writer import UPLOAD_METHODS
+        from garmin_mcp.garmin.workouts import _SPORT_TYPES
+
+        assert set(UPLOAD_METHODS) == set(_SPORT_TYPES)
+
+    def test_the_upload_methods_exist_on_the_client(self) -> None:
+        from garminconnect import Garmin
+
+        from garmin_mcp.garmin.workout_writer import UPLOAD_METHODS
+
+        missing = [m for m in UPLOAD_METHODS.values() if not hasattr(Garmin, m)]
+        assert not missing
