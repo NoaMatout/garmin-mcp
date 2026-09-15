@@ -670,3 +670,69 @@ def activities_with_plan_flag(
     )
     columns = [d[0] for d in result.description]
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def strength_sets(conn: duckdb.DuckDBPyConnection, activity_id: int) -> list[dict[str, Any]]:
+    """Every set of one strength session, rests included, in the order done."""
+    result = conn.execute(
+        """
+        SELECT set_index, is_rest, start_time_utc, duration_s, repetitions,
+               weight_kg, category, exercise_subtype, wkt_step_index
+        FROM strength_sets
+        WHERE activity_id = ?
+        ORDER BY set_index
+        """,
+        [activity_id],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def strength_history(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    exercise: str | None = None,
+    since: date | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Working sets across sessions, most recent first.
+
+    Rests are excluded here — this answers "how has the bench moved", and a
+    rest is not a data point about that. `strength_sets` keeps them for
+    anyone asking about one session in detail.
+
+    Grouped per (session, exercise, load) so a back-off block reads as one
+    line rather than four identical ones, which is how the prescription was
+    written in the first place.
+    """
+    sql = """
+        SELECT a.activity_id,
+               a.start_time_local,
+               a.name,
+               s.category,
+               s.weight_kg,
+               count(*)              AS sets,
+               min(s.repetitions)    AS min_reps,
+               max(s.repetitions)    AS max_reps,
+               sum(s.repetitions)    AS total_reps
+        FROM strength_sets s
+        JOIN activities a USING (activity_id)
+        WHERE NOT s.is_rest
+    """
+    params: list[Any] = []
+    if exercise is not None:
+        sql += " AND lower(s.category) LIKE ?"
+        params.append(f"%{exercise.lower()}%")
+    if since is not None:
+        sql += " AND a.start_time_local >= ?"
+        params.append(datetime.combine(since, datetime.min.time()))
+    sql += """
+        GROUP BY a.activity_id, a.start_time_local, a.name, s.category, s.weight_kg
+        ORDER BY a.start_time_local DESC, s.weight_kg DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]

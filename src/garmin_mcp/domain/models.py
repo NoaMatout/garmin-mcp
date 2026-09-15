@@ -128,6 +128,39 @@ class Lap:
 
 
 @dataclass(slots=True)
+class StrengthSet:
+    """One set of a strength session, as the watch recorded it.
+
+    A strength FIT file carries a `set` message per set *and* per rest, which
+    is why `is_rest` exists rather than rests being dropped: the gap between
+    two working sets is training data, and an athlete who cut their rests
+    short did a different session from the one prescribed.
+
+    `weight_kg` is the load the athlete handled, which for a weighted pull-up
+    is the weight added rather than the system weight — the same convention
+    the workout is written in, so a prescription and its result compare
+    directly.
+    """
+
+    set_index: int
+    is_rest: bool = False
+    start_time_utc: datetime | None = None
+    duration_s: float | None = None
+    repetitions: int | None = None
+    weight_kg: float | None = None
+    # The movement, from Garmin's taxonomy: "bench_press", "pull_up".
+    category: str | None = None
+    # Which variant within that category — barbell vs dumbbell, weighted vs
+    # not. The FIT profile resolves it to a bare integer whose meaning depends
+    # on the category, and no published table maps the pair to a name, so it
+    # is stored as the number it is rather than dressed up as one.
+    exercise_subtype: int | None = None
+    # Which prescribed step this set belongs to, when the session was run from
+    # a structured workout. Written by the watch, so the mapping is exact.
+    wkt_step_index: int | None = None
+
+
+@dataclass(slots=True)
 class Activity:
     """One FIT `session` message, or a synthetic multisport parent."""
 
@@ -181,6 +214,7 @@ class Activity:
 
     laps: list[Lap] = field(default_factory=list)
     records: list[Record] = field(default_factory=list)
+    sets: list[StrengthSet] = field(default_factory=list)
     planned_steps: list[PlannedStep] = field(default_factory=list)
     workout_name: str | None = None
 

@@ -539,3 +539,49 @@ def _conformity(laps: list[dict[str, Any]], step: dict[str, Any]) -> dict[str, A
     if short == [len(laps)]:
         return {"note_last_rep": "the last rep was cut short, which is common"}
     return {"short_reps": short, "prescribed_each": _prescription(step)}
+
+
+def summarize_strength_set(row: dict[str, Any]) -> dict[str, Any]:
+    """One set — or one rest, which is kept because it is training data too."""
+    if row.get("is_rest"):
+        return _compact(
+            {
+                "set": row.get("set_index"),
+                "rest": format_duration(row.get("duration_s")),
+            }
+        )
+    return _compact(
+        {
+            "set": row.get("set_index"),
+            "exercise": row.get("category"),
+            "reps": row.get("repetitions"),
+            "weight_kg": _round(row.get("weight_kg"), 1),
+            "duration": format_duration(row.get("duration_s")),
+            "planned_step": row.get("wkt_step_index"),
+        }
+    )
+
+
+def summarize_strength_block(row: dict[str, Any]) -> dict[str, Any]:
+    """Sets of one exercise at one load within a session, as a single line.
+
+    Rendered the way a session is written down — "4 × 3 @ 45 kg" — with the
+    rep range shown instead only when the sets were not all the same, which
+    is the interesting case: it means the last ones fell short.
+    """
+    low, high = row.get("min_reps"), row.get("max_reps")
+    reps = f"{low}" if low == high else f"{low}-{high}"
+    sets = row.get("sets")
+    weight = _round(row.get("weight_kg"), 1)
+
+    return _compact(
+        {
+            "date": _local_date(row.get("start_time_local")),
+            "activity_id": row.get("activity_id"),
+            "session": row.get("name"),
+            "exercise": row.get("category"),
+            "block": f"{sets} × {reps} @ {weight:g} kg" if weight else f"{sets} × {reps}",
+            "weight_kg": weight,
+            "total_reps": row.get("total_reps"),
+        }
+    )

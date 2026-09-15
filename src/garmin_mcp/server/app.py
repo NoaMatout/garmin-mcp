@@ -41,6 +41,10 @@ Two things worth knowing about the data:
   together with list_activities or weekly_summary when a question is about
   recovery or load, not sport data alone. It only holds a rolling recent
   window (see database_status for how far back it goes), not full history.
+* strength_history reads sets performed in the gym — reps and load per set,
+  from the watch. It records no measure of effort: how close a set was to
+  failure has to come from the athlete, and reps counted from the wrist are
+  often wrong by one.
 * list_courses and get_course_profile read saved routes (Garmin's "courses"),
   not activities — a course is a plan with a distance and elevation profile
   but nothing executed. Use these for pacing or nutrition planning around a
@@ -79,6 +83,7 @@ def create_server() -> MCPServer:
         tools.list_courses,
         tools.get_course_profile,
         tools.plan_nutrition,
+        tools.strength_history,
         tools.compare_activities,
         tools.compare_to_plan,
         tools.plan_adherence,
@@ -94,7 +99,7 @@ def create_server() -> MCPServer:
     ):
         mcp.tool()(function)
 
-    log.info("server.created", tools=20)
+    log.info("server.created", tools=21)
     return mcp
 
 
@@ -109,6 +114,7 @@ def tool_names() -> list[str]:
         "list_courses",
         "get_course_profile",
         "plan_nutrition",
+        "strength_history",
         "compare_activities",
         "compare_to_plan",
         "plan_adherence",

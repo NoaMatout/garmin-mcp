@@ -52,6 +52,7 @@ MSG_SESSION = 18
 MSG_LAP = 19
 MSG_RECORD = 20
 MSG_ACTIVITY = 34
+MSG_SET = 225
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +182,7 @@ SPORT = {
 }
 SUB_SPORT = {
     "generic": 0,
+    "strength_training": 20,
     "treadmill": 1,
     "trail": 3,
     "road": 7,
@@ -608,3 +610,134 @@ def build_corrupt() -> bytes:
     """Valid header, truncated body — the shape of an interrupted download."""
     payload = bytearray(build_run(num_records=10))
     return bytes(payload[: len(payload) // 2])
+
+
+SET_FIELDS = [
+    Field("timestamp", 254, UINT32),
+    Field("duration", 0, UINT32, scale=1000),
+    Field("repetitions", 3, UINT16),
+    # Garmin stores the load in sixteenths of a kilogram.
+    Field("weight", 4, UINT16, scale=16),
+    Field("set_type", 5, ENUM),
+    Field("start_time", 6, UINT32),
+    Field("category", 7, UINT16),
+    Field("category_subtype", 8, UINT16),
+    Field("wkt_step_index", 11, UINT16),
+]
+
+# exercise_category values, from the FIT profile.
+EXERCISE_CATEGORY = {"bench_press": 0, "pull_up": 21}
+
+
+def build_strength(
+    *,
+    start: datetime | None = None,
+    sets: list[dict[str, Any]] | None = None,
+    rest_s: int = 210,
+    tz_offset_s: int = 7200,
+) -> bytes:
+    """A gym session: `set` messages, no distance, no GPS.
+
+    Each entry in `sets` is one working set — {"reps", "weight", "category"} —
+    and a rest is written after each one, which is what a watch actually
+    records. The file deliberately carries no records and a single lap: a
+    strength FIT holds almost nothing a run does, and the parser has to cope
+    with that rather than assume every session has a track.
+    """
+    start = start or _dt("2026-09-15T18:30:00")
+    sets = sets or [
+        {"reps": 3, "weight": 112.5, "category": "bench_press"},
+        {"reps": 3, "weight": 105.0, "category": "bench_press"},
+    ]
+
+    writer = FitWriter()
+    writer.add(
+        MSG_FILE_ID,
+        FILE_ID_FIELDS,
+        {
+            "type": 4,
+            "manufacturer": MANUFACTURER_GARMIN,
+            "product": FR955_PRODUCT_ID,
+            "serial_number": 3987654321,
+            "time_created": start,
+        },
+    )
+
+    clock = start.timestamp()
+    set_duration_s = 20
+    for index, item in enumerate(sets):
+        writer.add(
+            MSG_SET,
+            SET_FIELDS,
+            {
+                "timestamp": datetime.fromtimestamp(clock + set_duration_s, tz=UTC),
+                "start_time": datetime.fromtimestamp(clock, tz=UTC),
+                "duration": set_duration_s,
+                "repetitions": item["reps"],
+                "weight": item["weight"],
+                "set_type": 1,  # active
+                "category": EXERCISE_CATEGORY[item["category"]],
+                "category_subtype": item.get("subtype", 0),
+                "wkt_step_index": index,
+            },
+        )
+        clock += set_duration_s
+        writer.add(
+            MSG_SET,
+            SET_FIELDS,
+            {
+                "timestamp": datetime.fromtimestamp(clock + rest_s, tz=UTC),
+                "start_time": datetime.fromtimestamp(clock, tz=UTC),
+                "duration": rest_s,
+                "set_type": 0,  # rest
+            },
+        )
+        clock += rest_s
+
+    total_s = int(clock - start.timestamp())
+    end = datetime.fromtimestamp(clock, tz=UTC)
+
+    writer.add(
+        MSG_LAP,
+        LAP_FIELDS,
+        {
+            "message_index": 0,
+            "timestamp": end,
+            "start_time": start,
+            "total_elapsed_time": total_s,
+            "total_timer_time": total_s,
+            "total_distance": 0.0,
+        },
+    )
+    writer.add(
+        MSG_SESSION,
+        SESSION_FIELDS,
+        {
+            "message_index": 0,
+            "timestamp": end,
+            "start_time": start,
+            "sport": SPORT["training"],
+            "sub_sport": SUB_SPORT["strength_training"],
+            "total_elapsed_time": total_s,
+            "total_timer_time": total_s,
+            "total_distance": 0.0,
+            "total_calories": 310,
+            "avg_heart_rate": 118,
+            "max_heart_rate": 163,
+            "num_laps": 1,
+        },
+    )
+    writer.add(
+        MSG_ACTIVITY,
+        ACTIVITY_FIELDS,
+        {
+            "timestamp": end,
+            "total_timer_time": total_s,
+            "num_sessions": 1,
+            "type": 0,
+            "event": 26,
+            "event_type": 1,
+            "local_timestamp": datetime.fromtimestamp(clock + tz_offset_s, tz=UTC),
+        },
+    )
+    return writer.to_bytes()

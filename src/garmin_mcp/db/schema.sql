@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS laps (
     PRIMARY KEY (activity_id, lap_index)
 );
 
+-- ─── Strength sets ────────────────────────────────────────────────────
+-- One row per set *and* per rest, as the watch records them. Rests are kept
+-- rather than filtered out: the gap between two working sets is training
+-- data, and an athlete who cut their rests short did a different session
+-- from the one prescribed.
+CREATE TABLE IF NOT EXISTS strength_sets (
+    activity_id    BIGINT  NOT NULL,
+    set_index      INTEGER NOT NULL,
+    is_rest        BOOLEAN NOT NULL DEFAULT FALSE,
+    start_time_utc TIMESTAMPTZ,
+    duration_s     DOUBLE,
+    repetitions    INTEGER,
+    -- The load handled, which for a weighted pull-up is the weight added
+    -- rather than the system weight — the same convention the workout is
+    -- written in, so a prescription and its result compare directly.
+    weight_kg      DOUBLE,
+    category       VARCHAR,   -- the movement: bench_press, pull_up
+    -- Which variant within the category. The FIT profile resolves it to a
+    -- bare integer whose meaning depends on the category, and no published
+    -- table maps the pair to a name, so it is kept as the number it is.
+    exercise_subtype INTEGER,
+    wkt_step_index INTEGER,
+    PRIMARY KEY (activity_id, set_index)
+);
+
 -- ─── The prescription ─────────────────────────────────────────────────
 -- Present only for sessions started from a structured workout on the watch.
 -- The plan travels inside the FIT file itself, so intent and execution can be

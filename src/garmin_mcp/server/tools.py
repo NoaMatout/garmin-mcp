@@ -1201,3 +1201,55 @@ def plan_adherence(week_start: str | None = None) -> dict[str, Any]:
 
     log.info("tool.plan_adherence", week=monday.isoformat(), planned=len(planned_by_date))
     return report
+
+
+def strength_history(
+    exercise: str | None = None,
+    since: str | None = None,
+    activity_id: int | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict[str, Any]:
+    """Sets actually performed in the gym, as the watch recorded them.
+
+    Args:
+        exercise: Filter by movement, matched loosely — "bench" finds
+            barbell_bench_press. Omit for every exercise.
+        since: Only sessions on or after this ISO date.
+        activity_id: One session in full, rests included, in the order done.
+            Overrides the other filters.
+        limit: Maximum rows (default 20, capped at 200).
+
+    Without `activity_id` this answers "how has this lift moved": working
+    sets only, grouped per session and load, so a back-off block of four
+    identical sets reads as one line rather than four.
+
+    Loads are what the athlete handled. For a weighted pull-up that is the
+    weight *added*, not bodyweight plus load, matching how the workout was
+    prescribed — so a session and its plan compare directly.
+
+    The watch counts reps from the wrist and gets it wrong often enough that
+    a rep count noticeably off the prescription usually means miscounting
+    rather than a missed set. It records no measure of effort at all: how
+    close a set was to failure has to come from the athlete.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    since_date = _parse_date(since, field="since")
+
+    with reading(_settings()) as conn:
+        if activity_id is not None:
+            rows = queries.strength_sets(conn, int(activity_id))
+            log.info("tool.strength_history", activity_id=int(activity_id), sets=len(rows))
+            return {
+                "activity_id": int(activity_id),
+                "count": len(rows),
+                "sets": [formatters.summarize_strength_set(r) for r in rows],
+            }
+
+        rows = queries.strength_history(conn, exercise=exercise, since=since_date, limit=limit)
+
+    log.info("tool.strength_history", exercise=exercise, returned=len(rows))
+    return {
+        "count": len(rows),
+        "filters": {"exercise": exercise, "since": since},
+        "sessions": [formatters.summarize_strength_block(r) for r in rows],
+    }

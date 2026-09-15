@@ -96,6 +96,19 @@ _LAP_COLUMNS = (
     "wkt_step_index",
 )
 
+_STRENGTH_SET_COLUMNS = (
+    "activity_id",
+    "set_index",
+    "is_rest",
+    "start_time_utc",
+    "duration_s",
+    "repetitions",
+    "weight_kg",
+    "category",
+    "exercise_subtype",
+    "wkt_step_index",
+)
+
 _PLANNED_STEP_COLUMNS = (
     "activity_id",
     "step_index",
@@ -144,6 +157,7 @@ class WriteResult:
     laps_written: int
     records_written: int
     replaced: bool
+    sets_written: int = 0
 
     @property
     def is_noop(self) -> bool:
@@ -227,6 +241,24 @@ def _lap_rows(activity: Activity) -> list[tuple[Any, ...]]:
             lap.wkt_step_index,
         )
         for lap in activity.laps
+    ]
+
+
+def _strength_set_rows(activity: Activity) -> list[tuple[Any, ...]]:
+    return [
+        (
+            activity.activity_id,
+            item.set_index,
+            item.is_rest,
+            item.start_time_utc,
+            item.duration_s,
+            item.repetitions,
+            item.weight_kg,
+            item.category,
+            item.exercise_subtype,
+            item.wkt_step_index,
+        )
+        for item in activity.sets
     ]
 
 
@@ -382,7 +414,7 @@ def write_parsed(
         # Replace rather than merge. Children are removed too: a re-parse may
         # split a file into a different number of sessions, and stale legs
         # pointing at a vanished parent would silently distort every total.
-        for table in ("records", "laps", "workout_steps", "activities"):
+        for table in ("records", "laps", "strength_sets", "workout_steps", "activities"):
             conn.execute(
                 f"DELETE FROM {table} WHERE activity_id IN ({', '.join('?' * len(activity_ids))})",
                 activity_ids,
@@ -405,6 +437,14 @@ def write_parsed(
                 f"INSERT INTO laps ({', '.join(_LAP_COLUMNS)}) "
                 f"VALUES ({_placeholders(_LAP_COLUMNS)})",
                 lap_rows,
+            )
+
+        set_rows = [row for a in parsed.activities for row in _strength_set_rows(a)]
+        if set_rows:
+            conn.executemany(
+                f"INSERT INTO strength_sets ({', '.join(_STRENGTH_SET_COLUMNS)}) "
+                f"VALUES ({_placeholders(_STRENGTH_SET_COLUMNS)})",
+                set_rows,
             )
 
         planned_rows = [row for a in parsed.activities for row in _planned_step_rows(a)]
@@ -434,6 +474,7 @@ def write_parsed(
         laps_written=len(lap_rows),
         records_written=len(record_rows),
         replaced=replaced,
+        sets_written=len(set_rows),
     )
     log.info(
         "db.written",
@@ -441,6 +482,7 @@ def write_parsed(
         activities=result.activities_written,
         laps=result.laps_written,
         records=result.records_written,
+        sets=result.sets_written,
         replaced=replaced,
     )
     return result
