@@ -706,9 +706,12 @@ def create_workout(
                    "duration_s": 1200}  or  {"distance_m": 2000},
                    optionally "target_pace": "3:55", "pace_tolerance_s": 5,
                    and "alert": true|false.
-                   Exactly one of duration_s or distance_m per step.
+                   A strength set instead ends on reps:
+                   {"kind": "interval", "reps": 3,
+                    "exercise": "bench_press", "weight_kg": 112.5}
+                   Exactly one of duration_s, distance_m or reps per step.
             Repeat: {"times": 4, "steps": [ ...steps... ]}
-        sport: running, cycling or swimming.
+        sport: running, cycling, swimming or strength.
         description: Optional note attached to the workout.
         confirm: Must be true to actually create it.
 
@@ -736,6 +739,21 @@ def create_workout(
              {"kind": "interval", "duration_s": 60, "target_pace": "3:45"},
              {"kind": "recovery", "duration_s": 60}]},
          {"kind": "cooldown", "duration_s": 600}]
+
+    Example blocks for "4 x 3 weighted pull-ups at +45 kg, 3:30 between sets":
+        [{"kind": "warmup", "duration_s": 600},
+         {"times": 4, "steps": [
+             {"kind": "interval", "reps": 3,
+              "exercise": "weighted_pull_up", "weight_kg": 45},
+             {"kind": "rest", "duration_s": 210}]}]
+
+    **On a strength session the load is what the athlete lifts.** For a
+    weighted pull-up that is the weight *added*, not the system weight — +45,
+    never 123. Exercise names come from a closed Garmin taxonomy that no
+    endpoint serves; only bench_press, weighted_pull_up and deadlift are
+    confirmed against the real API. Anything else needs a raw
+    "CATEGORY/EXERCISE_NAME" pair, which Garmin accepts without validating, so
+    a wrong one is only discovered on the watch mid-session.
     """
     from garmin_mcp.garmin.workouts import WorkoutSpecError, spec_from_dict
     from garmin_mcp.ingest.worker import request_workout
