@@ -456,10 +456,47 @@ def _build_set(msg: fitdecode.FitDataMessage, set_index: int) -> StrengthSet:
         duration_s=_as_float(_val(msg, "duration")),
         repetitions=_as_int(_val(msg, "repetitions")),
         weight_kg=_as_float(_val(msg, "weight")),
-        category=_as_str(_first_of_array(_val(msg, "category"))),
+        category=_exercise_category(_first_of_array(_val(msg, "category"))),
         exercise_subtype=_as_int(_first_of_array(_val(msg, "category_subtype"))),
         wkt_step_index=_as_int(_val(msg, "wkt_step_index")),
     )
+
+
+def _exercise_category(value: Any) -> str | None:
+    """Resolve Garmin's exercise category to a name.
+
+    fitdecode resolves this enum in some files and hands back the bare
+    integer in others — real watch files among them, where a pull-up arrives
+    as 21 — so the profile's own table is applied here rather than trusting
+    the decoder to have done it. An unmapped value stays the number it is
+    rather than being dropped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.isdigit():
+        return value
+    try:
+        return _EXERCISE_CATEGORIES[int(value)]
+    except (KeyError, TypeError, ValueError):
+        return _as_str(value)
+
+
+def _load_exercise_categories() -> dict[int, str]:
+    """The FIT profile's exercise_category table, read from fitdecode.
+
+    Guarded: a profile reshuffle upstream must degrade to raw numbers, not
+    stop every strength file from parsing.
+    """
+    try:
+        from fitdecode.profile import FIELD_TYPES
+
+        return {int(k): str(v) for k, v in FIELD_TYPES["exercise_category"].enum.items()}
+    except Exception:  # pragma: no cover — depends on the installed profile
+        log.warning("fit.exercise_categories_unavailable")
+        return {}
+
+
+_EXERCISE_CATEGORIES = _load_exercise_categories()
 
 
 def _first_of_array(value: Any) -> Any:

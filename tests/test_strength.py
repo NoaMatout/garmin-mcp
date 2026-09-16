@@ -18,7 +18,7 @@ import pytest
 from garmin_mcp.config import Settings
 from garmin_mcp.db import queries
 from garmin_mcp.db.migrations import PARSER_VERSION, init_database
-from garmin_mcp.ingest.fit_parser import parse_fit
+from garmin_mcp.ingest.fit_parser import _exercise_category, parse_fit
 from garmin_mcp.ingest.writer import write_parsed
 from garmin_mcp.server import tools
 from tests.fit_builder import build_strength
@@ -174,3 +174,27 @@ class TestStrengthTool:
         result = tools.strength_history(activity_id=parsed.activities[0].activity_id)
         assert result["count"] == len(SESSION) * 2
         assert any("rest" in s for s in result["sets"])
+
+
+class TestExerciseCategories:
+    """Real watch files hand back the category as a bare integer.
+
+    The synthetic files here happen to resolve it, so without these the bug
+    that shipped — a pull-up displayed as "21" — would not have been caught
+    by the suite.
+    """
+
+    def test_a_raw_integer_resolves_to_the_movement(self) -> None:
+        assert _exercise_category(0) == "bench_press"
+        assert _exercise_category(21) == "pull_up"
+
+    def test_a_digit_string_resolves_too(self) -> None:
+        assert _exercise_category("21") == "pull_up"
+
+    def test_an_already_resolved_name_is_left_alone(self) -> None:
+        assert _exercise_category("bench_press") == "bench_press"
+
+    def test_an_unmapped_category_keeps_its_number(self) -> None:
+        """Better a number than a dropped movement."""
+        assert _exercise_category(999) == "999"
+        assert _exercise_category(None) is None

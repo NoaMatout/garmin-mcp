@@ -25,7 +25,7 @@ SCHEMA_VERSION = 3
 # Bumping this forces every stored FIT file to be re-parsed on the next sync,
 # without re-downloading. Raise it whenever fit_parser starts extracting a
 # field it previously ignored.
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
