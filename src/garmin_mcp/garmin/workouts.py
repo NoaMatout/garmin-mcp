@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from garmin_mcp.domain.exercises import CATEGORY_NAMES
 from garmin_mcp.errors import GarminMcpError
 
 StepKind = Literal["warmup", "interval", "recovery", "cooldown", "rest"]
@@ -308,13 +309,22 @@ def resolve_exercise(name: str) -> tuple[str, str]:
             )
         return category.strip().upper(), exercise.strip().upper()
 
-    try:
+    if key.lower() in _EXERCISES:
         return _EXERCISES[key.lower()]
-    except KeyError:
-        raise WorkoutSpecError(
-            f"unknown exercise {name!r}; confirmed names are {sorted(_EXERCISES)}",
-            hint="or pass a raw CATEGORY/EXERCISE_NAME pair",
-        ) from None
+
+    # A bare category, with no variant under it. Garmin accepts this — its
+    # own warm-up steps are written that way — and it is what makes the
+    # accessory half of a session programmable: "row" is a fact from the FIT
+    # profile, where "BARBELL_ROW" would be a guess that only fails on the
+    # watch, mid-session.
+    if key.lower() in CATEGORY_NAMES:
+        return key.upper(), ""
+
+    raise WorkoutSpecError(
+        f"unknown exercise {name!r}; confirmed variants are {sorted(_EXERCISES)}",
+        hint="or use a bare category from the FIT taxonomy (row, squat, "
+        "triceps_extension...), or a raw CATEGORY/EXERCISE_NAME pair",
+    )
 
 
 def _silent_target_note(step: Step) -> str | None:

@@ -636,3 +636,37 @@ class TestSportCoverage:
 
         missing = [m for m in UPLOAD_METHODS.values() if not hasattr(Garmin, m)]
         assert not missing
+
+
+class TestBareCategories:
+    """A category with no variant is a fact; a guessed variant is not.
+
+    Garmin writes its own warm-up steps this way, which is what makes the
+    accessory half of a session programmable without inventing names that
+    only fail on the watch.
+    """
+
+    def test_a_bare_category_resolves_with_no_variant(self) -> None:
+        assert resolve_exercise("row") == ("ROW", "")
+        assert resolve_exercise("triceps_extension") == ("TRICEPS_EXTENSION", "")
+        assert resolve_exercise("shoulder_stability") == ("SHOULDER_STABILITY", "")
+
+    def test_a_confirmed_variant_still_wins_over_its_category(self) -> None:
+        # bench_press is both a category and a confirmed pair; the pair wins.
+        assert resolve_exercise("bench_press") == ("BENCH_PRESS", "BARBELL_BENCH_PRESS")
+
+    def test_something_in_neither_table_is_still_refused(self) -> None:
+        with pytest.raises(WorkoutSpecError, match="unknown exercise"):
+            resolve_exercise("bulgarian_split_squat")
+
+    def test_a_bare_category_builds_a_sendable_step(self) -> None:
+        spec = spec_from_dict(
+            {
+                "name": "Renfo",
+                "sport": "strength",
+                "blocks": [{"kind": "interval", "reps": 12, "exercise": "row"}],
+            }
+        )
+        step = _steps_of(build_workout(spec))[0]
+        assert step["category"] == "ROW"
+        assert step["exerciseName"] == ""

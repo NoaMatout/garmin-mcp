@@ -35,6 +35,7 @@ from typing import Any
 
 import fitdecode
 
+from garmin_mcp.domain.exercises import CATEGORIES
 from garmin_mcp.domain.models import (
     Activity,
     Lap,
@@ -476,27 +477,9 @@ def _exercise_category(value: Any) -> str | None:
     if isinstance(value, str) and not value.isdigit():
         return value
     try:
-        return _EXERCISE_CATEGORIES[int(value)]
+        return CATEGORIES[int(value)]
     except (KeyError, TypeError, ValueError):
         return _as_str(value)
-
-
-def _load_exercise_categories() -> dict[int, str]:
-    """The FIT profile's exercise_category table, read from fitdecode.
-
-    Guarded: a profile reshuffle upstream must degrade to raw numbers, not
-    stop every strength file from parsing.
-    """
-    try:
-        from fitdecode.profile import FIELD_TYPES
-
-        return {int(k): str(v) for k, v in FIELD_TYPES["exercise_category"].enum.items()}
-    except Exception:  # pragma: no cover — depends on the installed profile
-        log.warning("fit.exercise_categories_unavailable")
-        return {}
-
-
-_EXERCISE_CATEGORIES = _load_exercise_categories()
 
 
 def _first_of_array(value: Any) -> Any:
