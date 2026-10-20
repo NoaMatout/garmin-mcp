@@ -34,6 +34,8 @@ log = get_logger(__name__)
 class WritesDisabledError(GarminMcpError):
     """Writing to Garmin is switched off."""
 
+    code = "writes_disabled"
+
     def __init__(self) -> None:
         super().__init__(
             "writing to Garmin is disabled",

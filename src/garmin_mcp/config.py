@@ -113,6 +113,17 @@ class Settings(BaseSettings):
         """Where the MCP server drops sync requests for the worker."""
         return self.data_dir / ".triggers"
 
+    @property
+    def state_dir(self) -> Path:
+        """What the worker has observed about itself and about Garmin.
+
+        Apart from `trigger_dir` because the two have different lifetimes:
+        triggers are throwaway messages, this is a record that must outlive
+        a restart ("Garmin last worked on Tuesday" is worth knowing after the
+        worker comes back up).
+        """
+        return self.data_dir / ".state"
+
     def ensure_dirs(self) -> None:
         """Create the whole data tree. Idempotent, safe to call on every run."""
         for path in (
@@ -122,6 +133,7 @@ class Settings(BaseSettings):
             self.inbox_processed_dir,
             self.inbox_failed_dir,
             self.trigger_dir,
+            self.state_dir,
             self.token_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

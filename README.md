@@ -6,7 +6,7 @@
 
 Ask questions about your Garmin training history in plain language, from
 Claude — and send structured sessions back to your watch. Raw FIT files in,
-DuckDB out, sixteen typed MCP tools on top.
+DuckDB out, twenty-four typed MCP tools on top.
 
 ```
 > compare my last two runs
@@ -64,7 +64,7 @@ a model can answer questions against real data instead of guessing.
                            ▼
               ┌─────────────────────────┐
               │      MCP server         │
-              │  16 typed tools, no     │
+              │  24 typed tools, no     │
               │  generic SQL            │
               └────────────┬────────────┘
                            │  stdio  (or streamable HTTP)
@@ -125,6 +125,7 @@ uv run garmin-mcp sync --limit 50
 | `reparse` | Re-read every stored FIT file after a parser change — no network |
 | `status` | Report whether Garmin is currently reachable |
 | `info` | Show what the database holds |
+| `export-gpx` | Write a recorded activity's full-resolution GPS track as a GPX file (local, no Garmin session) |
 
 ## Tools exposed to Claude
 
@@ -137,6 +138,14 @@ uv run garmin-mcp sync --limit 50
 | `compare_activities` | Two activities with deltas computed | fixed |
 | `compare_to_plan` | A session against the workout it was run from | fixed |
 | `plan_adherence` | A week's plan against what was actually done | one week |
+| `sleep_history` | Nightly sleep, to read against training load | 20 by default, 200 max |
+| `strength_history` | Sets performed in the gym: reps and load | 50 by default |
+| `list_courses` | Saved Garmin navigation courses | 20 by default, 200 max |
+| `get_course_profile` | A course's elevation profile and named waypoints | 100 points, 2000 max |
+| `plan_nutrition` | Segment-by-segment fuelling plan for a course | fixed |
+| `find_local_activities` | Recorded runs that **started** near a point, with distance / D+ / duration ranges and GPS quality | 20 by default, 100 max |
+| `get_activity_route` | One run's GPS track simplified for a map, plus a link to the full GPX | 500 points by default, 2000 max |
+| `get_capabilities` | What this installation can do and what has actually been verified, with dates | fixed |
 | `database_status` | What is stored, worker health, reachability | fixed |
 | `sync_now` | Pull new activities without leaving the chat | needs the worker |
 | `list_workouts` | Saved sessions in your Garmin library, with their ids | 20 by default, 100 max |
@@ -146,6 +155,16 @@ uv run garmin-mcp sync --limit 50
 | `schedule_workout` | Put a saved session on a date in your calendar | off by default, two-step |
 | `unschedule_workout` | Drop a planned session, keeping the workout | off by default, two-step |
 | `set_activity_notes` | Write an analysis into an activity's Notes field | off by default, two-step |
+
+Two MCP **resources** serve GPX: `garmin://activity/{id}/route.gpx` (every valid
+fix of a recorded activity) and `garmin://course/{id}/route.gpx` (a saved
+course's stored geometry). They are generated on demand and read over the same
+connection as the tools, so they work the same over stdio and HTTP.
+
+Details, units, limits and errors: [route tools](docs/route-tools.md) ·
+[capabilities](docs/capabilities.md) · [Garmin courses, imports and what is
+supported](docs/garmin-courses.md) · [limits for a web app](docs/web-app-integration.md) ·
+[validation report](docs/validation.md).
 
 ## Design decisions
 

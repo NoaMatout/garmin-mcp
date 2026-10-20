@@ -500,5 +500,46 @@ def info() -> None:
         typer.echo(f"  {sport or 'unknown':<16} {count:>4} activities  {km or 0:>9,.1f} km")
 
 
+@app.command("export-gpx")
+def export_gpx(
+    activity_id: Annotated[int, typer.Argument(help="The activity to export.")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Where to write it. Default: ./activity-<id>.gpx"),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite the file if it exists.")
+    ] = False,
+) -> None:
+    """Write a recorded activity's full-resolution GPS track as a GPX file.
+
+    Reads the local database only — no Garmin session needed. This is the way
+    to get a file onto this machine; the MCP server offers the same GPX as a
+    resource, which is what a remote client should use instead of a path.
+    """
+    from garmin_mcp import routes
+
+    settings = get_settings()
+    target = output or Path(f"activity-{activity_id}.gpx")
+    if target.exists() and not force:
+        typer.secho(f"{target} exists — pass --force to overwrite", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    try:
+        with reading(settings) as conn:
+            route = routes.load_activity_route(conn, activity_id)
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+
+    if route.fix_count == 0:
+        typer.secho(f"activity {activity_id} has no valid GPS fix to export", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    target.write_text(routes.activity_gpx(route), encoding="utf-8")
+    gaps = f", {len(route.interruptions)} gap(s) not bridged" if route.interruptions else ""
+    typer.echo(f"wrote {target}: {route.fix_count} points, {len(route.segments)} segment(s){gaps}")
+
+
 if __name__ == "__main__":
     app()
