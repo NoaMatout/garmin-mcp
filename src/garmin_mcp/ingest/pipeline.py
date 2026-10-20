@@ -17,7 +17,7 @@ a year — so it is a first-class citizen, tested as such.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -30,7 +30,11 @@ from garmin_mcp.domain.models import Source
 from garmin_mcp.errors import FitParseError, GarminError, GarminRateLimitError, IngestError
 from garmin_mcp.garmin.source import ActivitySource
 from garmin_mcp.ingest import store
+from garmin_mcp.ingest.course_parser import attach_detail, parse_course_summary
+from garmin_mcp.ingest.course_writer import write_course_detail, write_course_summary
 from garmin_mcp.ingest.fit_parser import hash_fit_bytes, parse_fit
+from garmin_mcp.ingest.sleep_parser import parse_sleep
+from garmin_mcp.ingest.sleep_writer import write_sleep
 from garmin_mcp.ingest.writer import file_is_ingested, record_file_failure, write_parsed
 from garmin_mcp.logging import get_logger
 
@@ -317,6 +321,126 @@ def sync_from_garmin(
             )
 
     log.info("sync.done", summary=report.summary())
+    return report
+
+
+@dataclass(slots=True)
+class SleepSyncReport:
+    upserted: int = 0
+    failed: int = 0
+
+    def summary(self) -> str:
+        base = f"{self.upserted} night{'s' if self.upserted != 1 else ''} updated"
+        return f"{base}, {self.failed} failed" if self.failed else base
+
+
+def sync_sleep_from_garmin(
+    settings: Settings | None = None,
+    *,
+    days: int | None = None,
+    today: date | None = None,
+) -> SleepSyncReport:
+    """Refresh the trailing window of nightly sleep data.
+
+    Unlike an activity, a night is not immutable once downloaded: Garmin keeps
+    revising it for hours after the athlete wakes (a corrected wake time, a
+    nap folded in later), so every cycle re-fetches a short rolling window and
+    upserts, rather than only backfilling what is missing. The window stays
+    short on purpose — re-checking old nights buys nothing and costs a request
+    each, so `sleep_sync_days` (default 3) is deliberately not `sync_batch_size`.
+
+    `days=0` (or the setting at 0) is a no-op, the off switch: it costs
+    nothing to call and never resumes a session.
+    """
+    settings = settings or get_settings()
+    window = settings.sleep_sync_days if days is None else days
+    if window <= 0:
+        return SleepSyncReport()
+
+    settings.ensure_dirs()
+    today = today or date.today()
+    dates = [today - timedelta(days=offset) for offset in range(window)]
+
+    from garmin_mcp.garmin import health_reader
+
+    raw_by_date = health_reader.fetch_sleep(dates, settings)
+
+    report = SleepSyncReport()
+    with writing(settings) as conn:
+        for day, raw in raw_by_date.items():
+            if raw is None:
+                report.failed += 1
+                continue
+            session = parse_sleep(raw, day)
+            if session is None:
+                continue  # nothing watch-detected for this night
+            write_sleep(conn, session)
+            report.upserted += 1
+
+    log.info("sleep_sync.done", summary=report.summary())
+    return report
+
+
+@dataclass(slots=True)
+class CourseSyncReport:
+    summaries_refreshed: int = 0
+    details_fetched: int = 0
+    failed: int = 0
+
+    def summary(self) -> str:
+        base = f"{self.summaries_refreshed} course{'s' if self.summaries_refreshed != 1 else ''}"
+        if self.details_fetched:
+            base += f", {self.details_fetched} new with geometry fetched"
+        if self.failed:
+            base += f", {self.failed} failed"
+        return base
+
+
+def sync_courses_from_garmin(settings: Settings | None = None) -> CourseSyncReport:
+    """Refresh every course's summary, and fetch geometry for new ones only.
+
+    A course is static once created from the athlete's side, unlike an
+    activity or a night of sleep — so unlike those, this is not a rolling
+    window. The listing is cheap and refreshed every cycle (catches a
+    renamed or favourited course); the expensive per-course detail — its
+    track, up to a couple thousand points — is fetched exactly once, the
+    first cycle a course's id is seen.
+    """
+    from garmin_mcp.garmin import course_reader
+
+    settings = settings or get_settings()
+    settings.ensure_dirs()
+    report = CourseSyncReport()
+
+    raw_courses = course_reader.list_courses(settings)
+    if not raw_courses:
+        return report
+
+    with writing(settings) as conn:
+        known = queries.course_ids_with_detail(conn)
+        for raw in raw_courses:
+            course = parse_course_summary(raw)
+            write_course_summary(conn, course)
+            report.summaries_refreshed += 1
+
+            if course.course_id in known:
+                continue
+            try:
+                detail = course_reader.get_course(course.course_id, settings)
+            except GarminError as exc:
+                log.warning("course.detail_failed", course_id=course.course_id, error=str(exc))
+                report.failed += 1
+                continue
+            if detail is None:
+                report.failed += 1
+                continue
+
+            attach_detail(course, detail)
+            write_course_summary(conn, course)  # persists the merged `extra`
+            write_course_detail(conn, course)
+            report.details_fetched += 1
+
+    log.info("course_sync.done", summary=report.summary())
     return report
 
 

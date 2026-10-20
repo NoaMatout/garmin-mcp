@@ -20,12 +20,12 @@ from garmin_mcp.logging import get_logger
 
 log = get_logger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Bumping this forces every stored FIT file to be re-parsed on the next sync,
 # without re-downloading. Raise it whenever fit_parser starts extracting a
 # field it previously ignored.
-PARSER_VERSION = 2
+PARSER_VERSION = 4
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -40,8 +40,27 @@ def _v2_add_workout_step_link(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("ALTER TABLE laps ADD COLUMN IF NOT EXISTS wkt_step_index INTEGER")
 
 
+def _v3_add_sleep_recovery_fields(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add HRV status, resting heart rate and body battery change to sleep.
+
+    `sleep_sessions` itself predates this by one release (added and shipped in
+    the same migration-free deploy, since the table was brand new); these
+    three columns arrived one deploy later, once the raw payload turned out
+    to carry them at the top level rather than inside `dailySleepDTO` where
+    the rest of the sleep fields — and the initial, wrong guess — live.
+    """
+    conn.execute("ALTER TABLE sleep_sessions ADD COLUMN IF NOT EXISTS hrv_status VARCHAR")
+    conn.execute(
+        "ALTER TABLE sleep_sessions ADD COLUMN IF NOT EXISTS resting_heart_rate SMALLINT"
+    )
+    conn.execute(
+        "ALTER TABLE sleep_sessions ADD COLUMN IF NOT EXISTS body_battery_change INTEGER"
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[duckdb.DuckDBPyConnection], None]] = {
     2: _v2_add_workout_step_link,
+    3: _v3_add_sleep_recovery_fields,
 }
 
 

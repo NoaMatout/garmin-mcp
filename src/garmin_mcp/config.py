@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = Field(default=30, ge=1)
     sync_batch_size: int = Field(default=25, ge=1, le=200)
 
+    # How many trailing nights of sleep to re-fetch on every cycle. Small on
+    # purpose: unlike activities this is a refresh, not a backfill — Garmin
+    # revises a night's numbers for hours after wake, so recent dates are
+    # re-read every cycle rather than only once. 0 turns sleep sync off.
+    sleep_sync_days: int = Field(default=3, ge=0, le=30)
+
     # ─── Writing back to Garmin ───────────────────────────────────────
     # Off by default. Reading someone's history and modifying their account
     # are different things, and cloning this repository should not hand a
@@ -107,6 +113,17 @@ class Settings(BaseSettings):
         """Where the MCP server drops sync requests for the worker."""
         return self.data_dir / ".triggers"
 
+    @property
+    def state_dir(self) -> Path:
+        """What the worker has observed about itself and about Garmin.
+
+        Apart from `trigger_dir` because the two have different lifetimes:
+        triggers are throwaway messages, this is a record that must outlive
+        a restart ("Garmin last worked on Tuesday" is worth knowing after the
+        worker comes back up).
+        """
+        return self.data_dir / ".state"
+
     def ensure_dirs(self) -> None:
         """Create the whole data tree. Idempotent, safe to call on every run."""
         for path in (
@@ -116,6 +133,7 @@ class Settings(BaseSettings):
             self.inbox_processed_dir,
             self.inbox_failed_dir,
             self.trigger_dir,
+            self.state_dir,
             self.token_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

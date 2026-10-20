@@ -44,7 +44,16 @@ from garmin_mcp.errors import (
     GarminMcpError,
     WorkerUnavailableError,
 )
-from garmin_mcp.ingest.pipeline import IngestReport, import_inbox, sync_from_garmin
+from garmin_mcp.ingest import sync_state
+from garmin_mcp.ingest.pipeline import (
+    CourseSyncReport,
+    IngestReport,
+    SleepSyncReport,
+    import_inbox,
+    sync_courses_from_garmin,
+    sync_from_garmin,
+    sync_sleep_from_garmin,
+)
 from garmin_mcp.logging import get_logger
 
 log = get_logger(__name__)
@@ -329,14 +338,44 @@ class IngestWorker:
             # Expected and recoverable by the user; not worth a stack trace.
             log.warning("worker.garmin_needs_auth", error=str(exc))
             outcome["garmin_error"] = str(exc)
+            outcome["garmin_error_code"] = exc.code
             outcome["garmin_hint"] = "run `garmin-mcp auth`"
         except GarminError as exc:
             log.warning("worker.garmin_unavailable", error=str(exc))
             outcome["garmin_error"] = str(exc)
+            outcome["garmin_error_code"] = exc.code
         except Exception as exc:
             log.exception("worker.sync_failed")
             outcome["garmin_error"] = str(exc)
+            outcome["garmin_error_code"] = "sync_failed"
 
+        # Skipped when the activity sync above already failed: it would hit
+        # the same broken session and fail the same way, for a second network
+        # round trip that tells nobody anything new.
+        if "garmin_error" not in outcome:
+            try:
+                outcome["sleep"] = _sleep_report_dict(self._sync_sleep())
+            except GarminError as exc:
+                log.warning("worker.sleep_unavailable", error=str(exc))
+                outcome["sleep_error"] = str(exc)
+                outcome["sleep_error_code"] = exc.code
+            except Exception as exc:
+                log.exception("worker.sleep_sync_failed")
+                outcome["sleep_error"] = str(exc)
+                outcome["sleep_error_code"] = "sync_failed"
+
+            try:
+                outcome["courses"] = _course_report_dict(self._sync_courses())
+            except GarminError as exc:
+                log.warning("worker.course_sync_unavailable", error=str(exc))
+                outcome["courses_error"] = str(exc)
+                outcome["courses_error_code"] = exc.code
+            except Exception as exc:
+                log.exception("worker.course_sync_failed")
+                outcome["courses_error"] = str(exc)
+                outcome["courses_error_code"] = "sync_failed"
+
+        sync_state.record_cycle(self.settings, outcome)
         return outcome
 
     def _sync_garmin(self, *, limit: int | None) -> IngestReport:
@@ -349,6 +388,12 @@ class IngestWorker:
         finally:
             source.close()
 
+    def _sync_sleep(self) -> SleepSyncReport:
+        return sync_sleep_from_garmin(self.settings)
+
+    def _sync_courses(self) -> CourseSyncReport:
+        return sync_courses_from_garmin(self.settings)
+
     def _handle_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Edit a completed activity — currently only its Notes field."""
         from garmin_mcp.garmin import workout_writer
@@ -360,10 +405,15 @@ class IngestWorker:
             )
         except GarminMcpError as exc:
             log.warning("worker.activity_edit_failed", error=str(exc))
-            return {"finished_at": finished, "error": exc.message, "hint": exc.hint}
+            return {
+                "finished_at": finished,
+                "error": exc.message,
+                "error_code": exc.code,
+                "hint": exc.hint,
+            }
         except Exception as exc:
             log.exception("worker.activity_edit_failed")
-            return {"finished_at": finished, "error": str(exc)}
+            return {"finished_at": finished, "error": str(exc), "error_code": "request_failed"}
         return {"finished_at": finished, "activity_id": int(payload["activity_id"])}
 
     # ─── trigger files ────────────────────────────────────────────────
@@ -385,8 +435,20 @@ class IngestWorker:
 
             if kind == KIND_WORKOUT:
                 result = self._handle_workout(payload)
+                sync_state.record_operation(
+                    self.settings,
+                    f"workout.{payload.get('action', 'create')}",
+                    ok="error" not in result,
+                    error_code=result.get("error_code"),
+                )
             elif kind == KIND_ACTIVITY:
                 result = self._handle_activity(payload)
+                sync_state.record_operation(
+                    self.settings,
+                    "activity.set_notes",
+                    ok="error" not in result,
+                    error_code=result.get("error_code"),
+                )
             else:
                 result = self._run_cycle(limit=payload.get("limit"))
                 self._last_sync = datetime.now(UTC)
@@ -453,10 +515,15 @@ class IngestWorker:
             }
         except GarminMcpError as exc:
             log.warning("worker.workout_failed", action=action, error=str(exc))
-            return {"finished_at": finished, "error": exc.message, "hint": exc.hint}
+            return {
+                "finished_at": finished,
+                "error": exc.message,
+                "error_code": exc.code,
+                "hint": exc.hint,
+            }
         except Exception as exc:
             log.exception("worker.workout_failed", action=action)
-            return {"finished_at": finished, "error": str(exc)}
+            return {"finished_at": finished, "error": str(exc), "error_code": "request_failed"}
 
     def _expire_stale_requests(self) -> None:
         """Discard requests whose caller has long since given up."""
@@ -507,6 +574,23 @@ def _report_dict(report: IngestReport) -> dict[str, Any]:
         "failed": report.failed,
         "activities": report.activities,
         "samples": report.records,
+        "summary": report.summary(),
+    }
+
+
+def _sleep_report_dict(report: SleepSyncReport) -> dict[str, Any]:
+    return {
+        "upserted": report.upserted,
+        "failed": report.failed,
+        "summary": report.summary(),
+    }
+
+
+def _course_report_dict(report: CourseSyncReport) -> dict[str, Any]:
+    return {
+        "summaries_refreshed": report.summaries_refreshed,
+        "details_fetched": report.details_fetched,
+        "failed": report.failed,
         "summary": report.summary(),
     }
 

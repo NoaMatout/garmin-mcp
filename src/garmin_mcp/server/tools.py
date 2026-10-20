@@ -15,6 +15,7 @@ processes out of each other's way.
 
 from __future__ import annotations
 
+import itertools
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -221,6 +222,324 @@ def weekly_summary(week_start: str | None = None) -> dict[str, Any]:
     return summary
 
 
+def sleep_history(
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict[str, Any]:
+    """List nightly sleep, most recent first — for reading alongside training load.
+
+    Args:
+        since: Only nights on or after this ISO date.
+        until: Only nights on or before this ISO date.
+        limit: Maximum nights to return (default 20, capped at 200).
+
+    Sleep is kept fresh only for a rolling recent window (see
+    database_status for how many nights are actually stored, and how far
+    back they go) — an empty result for an older date usually means it was
+    never synced, not that nothing happened that night.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    start = _parse_date(since, field="since")
+    end = _parse_date(until, field="until")
+
+    with reading(_settings()) as conn:
+        rows = queries.sleep_history(conn, since=start, until=end, limit=limit)
+
+    log.info("tool.sleep_history", returned=len(rows))
+    return {
+        "count": len(rows),
+        "filters": {k: v for k, v in {"since": since, "until": until}.items() if v},
+        "nights": [formatters.summarize_sleep(row) for row in rows],
+    }
+
+
+def _round_or_none(value: Any, digits: int = 0) -> Any:
+    return round(value, digits) if isinstance(value, int | float) else None
+
+
+def _course_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "course_id": row["course_id"],
+        "name": row.get("name"),
+        "sport": row.get("sport"),
+        "distance_km": _round_or_none((row.get("distance_m") or 0) / 1000, 2) or None,
+        "elevation_gain_m": _round_or_none(row.get("elevation_gain_m")),
+        "elevation_loss_m": _round_or_none(row.get("elevation_loss_m")),
+    }
+
+
+def list_courses(
+    activity_type: str | None = None, limit: int = DEFAULT_LIST_LIMIT
+) -> dict[str, Any]:
+    """List saved courses (Garmin's term for a route imported ahead of time).
+
+    Args:
+        activity_type: Filter by sport, e.g. "trail_running".
+        limit: Maximum courses to return (default 20, capped at 200).
+
+    A course is a plan, not a run — it has a distance and an elevation
+    profile but no heart rate, no pace, nothing executed. Use
+    get_course_profile for the terrain shape and any named waypoints (aid
+    stations, summits) on one of them.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+
+    with reading(_settings()) as conn:
+        rows = queries.list_courses(conn, sport=activity_type, limit=limit)
+
+    def _summarize(row: dict[str, Any]) -> dict[str, Any]:
+        return _course_summary(row) | {
+            "favorite": row.get("favorite") or None,
+            "geometry_synced": row.get("has_geometry"),
+        }
+
+    log.info("tool.list_courses", returned=len(rows))
+    return {"count": len(rows), "courses": [_summarize(row) for row in rows]}
+
+
+def get_course_profile(course_id: int, max_points: int = 100) -> dict[str, Any]:
+    """One course's terrain profile and named waypoints — for planning a
+    session or a fuelling strategy around it, not for anything already run.
+
+    Args:
+        course_id: The course's id, as returned by list_courses.
+        max_points: How many points in the elevation profile (default 100).
+
+    Waypoints carry a cumulative distance from the start, so lining them up
+    against an estimated pace gives a segment-by-segment plan — how long
+    until the next aid station, and how far apart the unsupported stretches
+    are.
+    """
+    course_id = int(course_id)
+    max_points = max(2, min(int(max_points), MAX_STREAM_POINTS))
+
+    with reading(_settings()) as conn:
+        row = queries.get_course(conn, course_id)
+        if row is None:
+            raise ValueError(f"course {course_id} not found — check the id with list_courses")
+        waypoints = queries.get_course_waypoints(conn, course_id)
+        total_points = queries.count_course_points(conn, course_id)
+        profile = queries.get_course_profile(conn, course_id, max_points=max_points)
+
+    result: dict[str, Any] = _course_summary(row)
+
+    if total_points == 0:
+        result["note"] = "geometry not synced yet for this course — due on the next sync cycle"
+        return result
+
+    result["profile"] = {
+        "distance_km": [
+            _round_or_none(d / 1000, 3) if d is not None else None for d in profile["distance_m"]
+        ],
+        "elevation_m": [_round_or_none(e) for e in profile["elevation_m"]],
+    }
+    result["points_shown"] = len(profile["distance_m"])
+    result["points_total"] = total_points
+
+    if waypoints:
+        result["waypoints"] = [
+            {
+                "name": w.get("name"),
+                "type": w.get("point_type"),
+                "distance_km": _round_or_none((w.get("distance_m") or 0) / 1000, 2),
+                "elevation_m": _round_or_none(w.get("elevation_m")),
+            }
+            for w in waypoints
+        ]
+
+    log.info("tool.get_course_profile", course_id=course_id, waypoints=len(waypoints))
+    return result
+
+
+# Middle of the commonly cited 60-90 g/h carbohydrate range for sustained
+# endurance effort — a starting point, not a personalised figure.
+_DEFAULT_CARB_G_PER_HOUR = 65.0
+_DEFAULT_FLUID_ML_PER_KG_PER_HOUR = 7.0
+_DEFAULT_FLUID_ML_PER_HOUR = 550.0  # used only when no weight is given either
+
+# Ultra-pacing rule of thumb: a metre of climb costs roughly as much time as
+# ten metres of flat running. Used only to weight segments against each
+# other when splitting a caller-supplied duration — never to predict one.
+_VERTICAL_METRE_EQUIVALENT_M = 10.0
+
+# A course with no named waypoints still gets split into readable chunks
+# rather than reported as one giant segment; capped so a very long course
+# does not produce dozens of near-identical rows.
+_MAX_EVEN_SEGMENTS = 6
+_EVEN_SEGMENT_TARGET_M = 5000.0
+
+# Below this, the qualitative fuelling advice below does not apply — texture
+# fatigue and sweetness fatigue are ultra-distance problems, not relevant to
+# a 90-minute effort. Sourced from how experienced ultra runners structure
+# a real race plan (an athlete's own published UTMB/CCC nutrition breakdown,
+# shared 2026-09-07): chewable, energy-dense food early; softer, easier to
+# swallow food as fatigue sets in; salty alternated with sweet to avoid
+# sweetness fatigue; caffeine held back for when alertness actually drops
+# rather than taken from the start.
+_QUALITATIVE_ADVICE_THRESHOLD_MIN = 180.0
+
+
+def _texture_hint(fraction_complete: float) -> str:
+    if fraction_complete < 0.4:
+        return "solide (barre, fruits secs) — l'estomac tolère encore le plus dense"
+    if fraction_complete < 0.75:
+        return "mixte (gel, gommes)"
+    return "liquide/facile à avaler (gel fluide, purée) — la mâchoire et l'estomac fatiguent"
+
+
+def _flavor_hint(segment_index: int) -> str:
+    return "salé" if segment_index % 2 else "sucré"
+
+
+def plan_nutrition(
+    course_id: int,
+    estimated_duration_min: float,
+    weight_kg: float | None = None,
+    carb_g_per_hour: float | None = None,
+    fluid_ml_per_hour: float | None = None,
+) -> dict[str, Any]:
+    """A segment-by-segment fuelling plan for one saved course.
+
+    Args:
+        course_id: The course's id, as returned by list_courses.
+        estimated_duration_min: How long the athlete expects to take.
+            Supplied by the caller, not derived here — trail pace depends on
+            fitness, conditions and terrain in ways this has no way to know.
+            This tool distributes a duration already estimated; it does not
+            predict one.
+        weight_kg: Sizes the default fluid rate (ml/kg/h). Ignored if
+            fluid_ml_per_hour is given explicitly.
+        carb_g_per_hour: Defaults to 65 g/h, the middle of the commonly
+            cited 60-90 g/h range for sustained endurance effort.
+        fluid_ml_per_hour: Defaults to 7 ml/kg/h when weight_kg is given,
+            otherwise a flat 550 ml/h.
+
+    Segments are the stretches between named waypoints (aid stations) when
+    the course has any, or even chunks otherwise. Time — and so fuel — is
+    split between segments by effort, not raw distance: each metre of climb
+    counts as roughly ten metres of flat running, a common ultra-pacing
+    heuristic. That makes the segment durations relative weights on a real
+    total, not a predicted split time — a plan to adjust on the ground, not
+    a prescription.
+    """
+    course_id = int(course_id)
+    duration_min = float(estimated_duration_min)
+    if duration_min <= 0:
+        raise ValueError("estimated_duration_min must be positive")
+
+    carb_rate = carb_g_per_hour if carb_g_per_hour is not None else _DEFAULT_CARB_G_PER_HOUR
+    if fluid_ml_per_hour is not None:
+        fluid_rate = float(fluid_ml_per_hour)
+    elif weight_kg is not None:
+        fluid_rate = float(weight_kg) * _DEFAULT_FLUID_ML_PER_KG_PER_HOUR
+    else:
+        fluid_rate = _DEFAULT_FLUID_ML_PER_HOUR
+
+    with reading(_settings()) as conn:
+        row = queries.get_course(conn, course_id)
+        if row is None:
+            raise ValueError(f"course {course_id} not found — check the id with list_courses")
+        total_points = queries.count_course_points(conn, course_id)
+        if total_points == 0:
+            raise ValueError(f"course {course_id} has no geometry synced yet")
+
+        total_distance_m = row.get("distance_m") or 0.0
+        waypoints = queries.get_course_waypoints(conn, course_id)
+        waypoint_names = {
+            w["distance_m"]: w.get("name")
+            for w in waypoints
+            if w.get("distance_m") is not None
+        }
+
+        boundaries = sorted(d for d in waypoint_names if 0 < d < total_distance_m)
+        if not boundaries:
+            raw_chunks = round(total_distance_m / _EVEN_SEGMENT_TARGET_M) or 1
+            chunks = max(1, min(_MAX_EVEN_SEGMENTS, raw_chunks))
+            step = total_distance_m / chunks
+            boundaries = [step * i for i in range(1, chunks)]
+
+        edges = [0.0, *boundaries, total_distance_m]
+        segments = [
+            {
+                "start_m": start,
+                "end_m": end,
+                "distance_m": end - start,
+                "gain_m": queries.course_segment_gain(conn, course_id, start, end),
+                "aid_station": waypoint_names.get(end),
+            }
+            for start, end in itertools.pairwise(edges)
+        ]
+
+    total_effort = sum(
+        s["distance_m"] + s["gain_m"] * _VERTICAL_METRE_EQUIVALENT_M for s in segments
+    )
+    if total_effort <= 0:
+        raise ValueError(f"course {course_id} has no measurable distance to plan around")
+
+    long_effort = duration_min >= _QUALITATIVE_ADVICE_THRESHOLD_MIN
+    cumulative_min = 0.0
+    plan = []
+    for index, s in enumerate(segments):
+        effort = s["distance_m"] + s["gain_m"] * _VERTICAL_METRE_EQUIVALENT_M
+        seg_duration_min = duration_min * (effort / total_effort)
+        cumulative_min += seg_duration_min
+        hours = seg_duration_min / 60
+
+        entry: dict[str, Any] = {
+            "segment_km": f"{s['start_m'] / 1000:.1f}–{s['end_m'] / 1000:.1f}",
+            "gain_m": round(s["gain_m"]) if s["gain_m"] else None,
+            "duration_min": round(seg_duration_min),
+            "cumulative_min": round(cumulative_min),
+            "carbs_g": round(carb_rate * hours),
+            "fluid_ml": round(fluid_rate * hours),
+        }
+        if s["aid_station"]:
+            entry["aid_station"] = s["aid_station"]
+        elif seg_duration_min > 60:
+            entry["unsupported"] = "no known aid station on this stretch — carry it"
+
+        if long_effort:
+            entry["texture"] = _texture_hint(cumulative_min / duration_min)
+            entry["lean"] = _flavor_hint(index)
+            if cumulative_min / duration_min > 0.85:
+                entry["caffeine"] = "envisager si la vigilance baisse"
+
+        plan.append({k: v for k, v in entry.items() if v is not None})
+
+    total_hours = duration_min / 60
+    log.info("tool.plan_nutrition", course_id=course_id, segments=len(plan))
+    result: dict[str, Any] = {
+        "course_id": course_id,
+        "name": row.get("name"),
+        "distance_km": round(total_distance_m / 1000, 2),
+        "estimated_duration_min": round(duration_min),
+        "rates_used": {"carb_g_per_hour": carb_rate, "fluid_ml_per_hour": round(fluid_rate)},
+        "totals": {
+            "carbs_g": round(carb_rate * total_hours),
+            "fluid_ml": round(fluid_rate * total_hours),
+            "gels_25g_equivalent": round(carb_rate * total_hours / 25, 1),
+            "bottles_500ml_equivalent": round(fluid_rate * total_hours / 500, 1),
+        },
+        "segments": plan,
+        "note": (
+            "segments are weighted by effort (climb counted as ~10x flat distance), "
+            "not measured pace — durations are relative splits of your own duration "
+            "estimate, not a predicted finish time"
+        ),
+    }
+
+    if long_effort:
+        result["fueling_principles"] = [
+            "texture: solide en début d'effort, de plus en plus liquide/facile à "
+            "avaler vers la fin, quand mâcher devient dur",
+            "alterne sucré et salé pour éviter l'écœurement sur la durée",
+            "garde la caféine pour quand la vigilance baisse réellement, pas dès le départ",
+        ]
+
+    return result
+
+
 def compare_activities(id_a: int, id_b: int) -> dict[str, Any]:
     """Compare two activities side by side, with the differences computed.
 
@@ -276,6 +595,7 @@ def database_status() -> dict[str, Any]:
         with reading(settings) as conn:
             counts = queries.activity_counts(conn)
             sports = queries.volume_by_sport(conn)
+            sleep = queries.sleep_counts(conn)
     except DatabaseLockedError as exc:
         return {"available": False, "reason": str(exc)}
 
@@ -303,6 +623,11 @@ def database_status() -> dict[str, Any]:
         "files_failed": counts["files_failed"],
         "first_activity": _stamp(counts["first_activity"]),
         "last_activity": _stamp(counts["last_activity"]),
+        "sleep": {
+            "nights_recorded": sleep["nights"],
+            "first_night": _stamp(sleep["first_night"]),
+            "last_night": _stamp(sleep["last_night"]),
+        },
         "by_sport": [
             {"sport": sport, "activities": count, "distance_km": round(km, 1)}
             for sport, count, km in sports
@@ -381,9 +706,12 @@ def create_workout(
                    "duration_s": 1200}  or  {"distance_m": 2000},
                    optionally "target_pace": "3:55", "pace_tolerance_s": 5,
                    and "alert": true|false.
-                   Exactly one of duration_s or distance_m per step.
+                   A strength set instead ends on reps:
+                   {"kind": "interval", "reps": 3,
+                    "exercise": "bench_press", "weight_kg": 112.5}
+                   Exactly one of duration_s, distance_m or reps per step.
             Repeat: {"times": 4, "steps": [ ...steps... ]}
-        sport: running, cycling or swimming.
+        sport: running, cycling, swimming or strength.
         description: Optional note attached to the workout.
         confirm: Must be true to actually create it.
 
@@ -411,6 +739,21 @@ def create_workout(
              {"kind": "interval", "duration_s": 60, "target_pace": "3:45"},
              {"kind": "recovery", "duration_s": 60}]},
          {"kind": "cooldown", "duration_s": 600}]
+
+    Example blocks for "4 x 3 weighted pull-ups at +45 kg, 3:30 between sets":
+        [{"kind": "warmup", "duration_s": 600},
+         {"times": 4, "steps": [
+             {"kind": "interval", "reps": 3,
+              "exercise": "weighted_pull_up", "weight_kg": 45},
+             {"kind": "rest", "duration_s": 210}]}]
+
+    **On a strength session the load is what the athlete lifts.** For a
+    weighted pull-up that is the weight *added*, not the system weight — +45,
+    never 123. Exercise names come from a closed Garmin taxonomy that no
+    endpoint serves; only bench_press, weighted_pull_up and deadlift are
+    confirmed against the real API. Anything else needs a raw
+    "CATEGORY/EXERCISE_NAME" pair, which Garmin accepts without validating, so
+    a wrong one is only discovered on the watch mid-session.
     """
     from garmin_mcp.garmin.workouts import WorkoutSpecError, spec_from_dict
     from garmin_mcp.ingest.worker import request_workout
@@ -858,3 +1201,55 @@ def plan_adherence(week_start: str | None = None) -> dict[str, Any]:
 
     log.info("tool.plan_adherence", week=monday.isoformat(), planned=len(planned_by_date))
     return report
+
+
+def strength_history(
+    exercise: str | None = None,
+    since: str | None = None,
+    activity_id: int | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict[str, Any]:
+    """Sets actually performed in the gym, as the watch recorded them.
+
+    Args:
+        exercise: Filter by movement, matched loosely — "bench" finds
+            barbell_bench_press. Omit for every exercise.
+        since: Only sessions on or after this ISO date.
+        activity_id: One session in full, rests included, in the order done.
+            Overrides the other filters.
+        limit: Maximum rows (default 20, capped at 200).
+
+    Without `activity_id` this answers "how has this lift moved": working
+    sets only, grouped per session and load, so a back-off block of four
+    identical sets reads as one line rather than four.
+
+    Loads are what the athlete handled. For a weighted pull-up that is the
+    weight *added*, not bodyweight plus load, matching how the workout was
+    prescribed — so a session and its plan compare directly.
+
+    The watch counts reps from the wrist and gets it wrong often enough that
+    a rep count noticeably off the prescription usually means miscounting
+    rather than a missed set. It records no measure of effort at all: how
+    close a set was to failure has to come from the athlete.
+    """
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    since_date = _parse_date(since, field="since")
+
+    with reading(_settings()) as conn:
+        if activity_id is not None:
+            rows = queries.strength_sets(conn, int(activity_id))
+            log.info("tool.strength_history", activity_id=int(activity_id), sets=len(rows))
+            return {
+                "activity_id": int(activity_id),
+                "count": len(rows),
+                "sets": [formatters.summarize_strength_set(r) for r in rows],
+            }
+
+        rows = queries.strength_history(conn, exercise=exercise, since=since_date, limit=limit)
+
+    log.info("tool.strength_history", exercise=exercise, returned=len(rows))
+    return {
+        "count": len(rows),
+        "filters": {"exercise": exercise, "since": since},
+        "sessions": [formatters.summarize_strength_block(r) for r in rows],
+    }

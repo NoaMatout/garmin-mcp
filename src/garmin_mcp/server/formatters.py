@@ -125,6 +125,35 @@ def summarize_lap(lap: dict[str, Any], sport: str | None) -> dict[str, Any]:
     )
 
 
+def summarize_sleep(row: dict[str, Any]) -> dict[str, Any]:
+    """One night, in the units a person reads sleep in — hours, not seconds."""
+
+    def _clock(value: Any) -> str | None:
+        return value.strftime("%H:%M") if isinstance(value, datetime) else None
+
+    return _compact(
+        {
+            "date": _local_date(row.get("calendar_date")),
+            "duration": format_duration(row.get("total_sleep_s")),
+            "bedtime": _clock(row.get("sleep_start_local")),
+            "wake_time": _clock(row.get("sleep_end_local")),
+            "deep": format_duration(row.get("deep_sleep_s")),
+            "light": format_duration(row.get("light_sleep_s")),
+            "rem": format_duration(row.get("rem_sleep_s")),
+            "awake": format_duration(row.get("awake_s")),
+            "nap": format_duration(row.get("nap_s")),
+            "score": row.get("sleep_score"),
+            "quality": row.get("sleep_quality"),
+            "avg_hrv_ms": _round(row.get("avg_hrv"), 0),
+            "avg_spo2_pct": _round(row.get("avg_spo2"), 0),
+            "avg_respiration": _round(row.get("avg_respiration"), 1),
+            "hrv_status": row.get("hrv_status"),
+            "resting_hr": row.get("resting_heart_rate"),
+            "body_battery_change": row.get("body_battery_change"),
+        }
+    )
+
+
 def summarize_week(rows: list[dict[str, Any]], week_start: date) -> dict[str, Any]:
     """Per-sport volume for one week, plus a combined line.
 
@@ -510,3 +539,49 @@ def _conformity(laps: list[dict[str, Any]], step: dict[str, Any]) -> dict[str, A
     if short == [len(laps)]:
         return {"note_last_rep": "the last rep was cut short, which is common"}
     return {"short_reps": short, "prescribed_each": _prescription(step)}
+
+
+def summarize_strength_set(row: dict[str, Any]) -> dict[str, Any]:
+    """One set — or one rest, which is kept because it is training data too."""
+    if row.get("is_rest"):
+        return _compact(
+            {
+                "set": row.get("set_index"),
+                "rest": format_duration(row.get("duration_s")),
+            }
+        )
+    return _compact(
+        {
+            "set": row.get("set_index"),
+            "exercise": row.get("category"),
+            "reps": row.get("repetitions"),
+            "weight_kg": _round(row.get("weight_kg"), 1),
+            "duration": format_duration(row.get("duration_s")),
+            "planned_step": row.get("wkt_step_index"),
+        }
+    )
+
+
+def summarize_strength_block(row: dict[str, Any]) -> dict[str, Any]:
+    """Sets of one exercise at one load within a session, as a single line.
+
+    Rendered the way a session is written down — "4 × 3 @ 45 kg" — with the
+    rep range shown instead only when the sets were not all the same, which
+    is the interesting case: it means the last ones fell short.
+    """
+    low, high = row.get("min_reps"), row.get("max_reps")
+    reps = f"{low}" if low == high else f"{low}-{high}"
+    sets = row.get("sets")
+    weight = _round(row.get("weight_kg"), 1)
+
+    return _compact(
+        {
+            "date": _local_date(row.get("start_time_local")),
+            "activity_id": row.get("activity_id"),
+            "session": row.get("name"),
+            "exercise": row.get("category"),
+            "block": f"{sets} × {reps} @ {weight:g} kg" if weight else f"{sets} × {reps}",
+            "weight_kg": weight,
+            "total_reps": row.get("total_reps"),
+        }
+    )

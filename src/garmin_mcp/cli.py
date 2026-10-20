@@ -172,7 +172,7 @@ def sync(
     from datetime import date as date_type
 
     from garmin_mcp.garmin.factory import resolve_source
-    from garmin_mcp.ingest.pipeline import sync_from_garmin
+    from garmin_mcp.ingest.pipeline import sync_from_garmin, sync_sleep_from_garmin
 
     settings = get_settings()
     settings.ensure_dirs()
@@ -202,10 +202,18 @@ def sync(
 
     if not report.outcomes:
         typer.secho("already up to date", fg=typer.colors.GREEN)
-        return
-    for outcome in report.outcomes:
-        typer.echo(f"  {outcome.status:<9} {outcome.name}")
-    typer.echo(report.summary())
+    else:
+        for outcome in report.outcomes:
+            typer.echo(f"  {outcome.status:<9} {outcome.name}")
+        typer.echo(report.summary())
+
+    # Same rolling-window refresh the worker does on every cycle — kept here
+    # too so a one-off CLI sync leaves sleep exactly as current as activities.
+    try:
+        sleep_report = sync_sleep_from_garmin(settings)
+        typer.echo(f"sleep: {sleep_report.summary()}")
+    except GarminMcpError as exc:
+        typer.secho(f"sleep: {exc}", fg=typer.colors.YELLOW, err=True)
 
 
 @app.command()
@@ -490,6 +498,47 @@ def info() -> None:
         typer.echo(f"range      {first:%Y-%m-%d} → {last:%Y-%m-%d}")
     for sport, count, km in by_sport:
         typer.echo(f"  {sport or 'unknown':<16} {count:>4} activities  {km or 0:>9,.1f} km")
+
+
+@app.command("export-gpx")
+def export_gpx(
+    activity_id: Annotated[int, typer.Argument(help="The activity to export.")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Where to write it. Default: ./activity-<id>.gpx"),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite the file if it exists.")
+    ] = False,
+) -> None:
+    """Write a recorded activity's full-resolution GPS track as a GPX file.
+
+    Reads the local database only — no Garmin session needed. This is the way
+    to get a file onto this machine; the MCP server offers the same GPX as a
+    resource, which is what a remote client should use instead of a path.
+    """
+    from garmin_mcp import routes
+
+    settings = get_settings()
+    target = output or Path(f"activity-{activity_id}.gpx")
+    if target.exists() and not force:
+        typer.secho(f"{target} exists — pass --force to overwrite", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    try:
+        with reading(settings) as conn:
+            route = routes.load_activity_route(conn, activity_id)
+    except GarminMcpError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+
+    if route.fix_count == 0:
+        typer.secho(f"activity {activity_id} has no valid GPS fix to export", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    target.write_text(routes.activity_gpx(route), encoding="utf-8")
+    gaps = f", {len(route.interruptions)} gap(s) not bridged" if route.interruptions else ""
+    typer.echo(f"wrote {target}: {route.fix_count} points, {len(route.segments)} segment(s){gaps}")
 
 
 if __name__ == "__main__":

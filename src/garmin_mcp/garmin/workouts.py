@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from garmin_mcp.domain.exercises import CATEGORY_NAMES
 from garmin_mcp.errors import GarminMcpError
 
 StepKind = Literal["warmup", "interval", "recovery", "cooldown", "rest"]
@@ -41,6 +42,7 @@ _END_CONDITIONS: dict[str, tuple[int, str]] = {
     "time": (2, "time"),
     "distance": (3, "distance"),
     "iterations": (7, "iterations"),
+    "reps": (10, "reps"),
 }
 
 _TARGET_TYPES: dict[str, tuple[int, str]] = {
@@ -52,8 +54,38 @@ _TARGET_TYPES: dict[str, tuple[int, str]] = {
 _SPORT_TYPES: dict[str, tuple[int, str]] = {
     "running": (1, "running"),
     "cycling": (2, "cycling"),
+    # FIXME: swimming's id conflicts with strength's. Reading a strength
+    # workout back from Garmin returns sportTypeId 5 for strength_training,
+    # so 5 cannot also be swimming — one of the two is wrong, and the API is
+    # the authority on strength. Left as-is rather than guessed at: the same
+    # trick that settled strength (create one by hand, read it back) will
+    # settle swimming, and no swimming workout has ever been created here.
     "swimming": (5, "swimming"),
+    "strength": (5, "strength_training"),
 }
+
+# Garmin identifies an exercise by a (category, name) pair drawn from a closed
+# taxonomy. No endpoint serves that taxonomy — several plausible paths all 404
+# — and the library does not ship it, so every pair below was read back from a
+# real workout built by hand in Garmin Connect. Guessed pairs are deliberately
+# absent: Garmin accepts an unknown name without complaint and the mistake
+# only surfaces on the watch, mid-session. Anything missing can still be sent
+# by passing "CATEGORY/EXERCISE_NAME" directly.
+_EXERCISES: dict[str, tuple[str, str]] = {
+    "bench_press": ("BENCH_PRESS", "BARBELL_BENCH_PRESS"),
+    "weighted_pull_up": ("PULL_UP", "WEIGHTED_PULL_UP"),
+    "deadlift": ("DEADLIFT", "BARBELL_DEADLIFT"),
+}
+
+# Warm-up and rest steps carry no exercise; Garmin still wants a category.
+_NEUTRAL_CATEGORY = "CARDIO"
+
+# Only used to estimate a duration for the listing. A heavy triple and a set
+# of twelve are not the same tempo, but nothing downstream depends on this
+# being right, and Garmin recomputes its own estimate anyway.
+_SECONDS_PER_REP = 4
+
+_WEIGHT_UNIT: dict[str, Any] = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
 
 # A pace outside this range is a typo, not a session. Roughly 2:00/km — faster
 # than the world record — to 20:00/km, slower than walking.
@@ -98,14 +130,21 @@ def format_pace_s(seconds_per_km: float) -> str:
 class Step:
     """One block of a session.
 
-    Exactly one of `duration_s` or `distance_m` must be set — that is the
-    condition ending the step. A step with neither would run until the athlete
+    Exactly one of `duration_s`, `distance_m` or `reps` must be set — that is
+    the condition ending the step. A step with none would run until the athlete
     pressed lap, which is never what a written session means.
+
+    `reps` is what makes a strength set: the watch shows the exercise and the
+    load, and the athlete closes each set with the lap button.
     """
 
     kind: StepKind
     duration_s: int | None = None
     distance_m: float | None = None
+    reps: int | None = None
+    # Either a key of _EXERCISES or a raw "CATEGORY/EXERCISE_NAME" pair.
+    exercise: str | None = None
+    weight_kg: float | None = None
     target_pace: str | None = None
     pace_tolerance_s: int = 5
     # Whether the watch should police the target. Off means the pace is
@@ -121,14 +160,37 @@ class Step:
                 f"unknown step kind {self.kind!r}; expected one of "
                 f"{sorted(k for k in _STEP_TYPES if k != 'repeat')}"
             )
-        if (self.duration_s is None) == (self.distance_m is None):
+        given = [
+            name
+            for name, value in (
+                ("duration_s", self.duration_s),
+                ("distance_m", self.distance_m),
+                ("reps", self.reps),
+            )
+            if value is not None
+        ]
+        if len(given) != 1:
             raise WorkoutSpecError(
-                f"step {self.kind!r} needs exactly one of duration_s or distance_m"
+                f"step {self.kind!r} needs exactly one of duration_s, distance_m or reps"
+                + (f", got {sorted(given)}" if given else "")
             )
         if self.duration_s is not None and self.duration_s <= 0:
             raise WorkoutSpecError("duration_s must be positive")
         if self.distance_m is not None and self.distance_m <= 0:
             raise WorkoutSpecError("distance_m must be positive")
+        if self.reps is not None:
+            if self.reps <= 0:
+                raise WorkoutSpecError("reps must be positive")
+            # Without an exercise the watch shows a bare rep count and no
+            # movement, which is not a session anyone can follow.
+            if not self.exercise:
+                raise WorkoutSpecError("a step counted in reps needs an exercise")
+            resolve_exercise(self.exercise)
+        if self.weight_kg is not None:
+            if self.reps is None:
+                raise WorkoutSpecError("weight_kg only means anything on a step counted in reps")
+            if self.weight_kg < 0:
+                raise WorkoutSpecError("weight_kg cannot be negative")
         if self.target_pace is not None:
             parse_pace(self.target_pace)
 
@@ -137,10 +199,15 @@ class Step:
         """How long this step takes, for the workout's duration estimate."""
         if self.duration_s is not None:
             return self.duration_s
+        if self.reps is not None:
+            return self.reps * _SECONDS_PER_REP
         pace = parse_pace(self.target_pace) if self.target_pace else 300
         return round((self.distance_m or 0) / 1000 * pace)
 
     def describe(self) -> str:
+        if self.reps is not None:
+            load = f" @ {self.weight_kg:g} kg" if self.weight_kg else ""
+            return f"{self.kind} {self.reps} × {self.exercise}{load}"
         if self.duration_s is not None:
             extent = _human_duration(self.duration_s)
         else:
@@ -223,6 +290,43 @@ class WorkoutSpec:
         }
 
 
+def resolve_exercise(name: str) -> tuple[str, str]:
+    """Turn an exercise name into Garmin's (category, exerciseName) pair.
+
+    Accepts a friendly key from `_EXERCISES`, or a raw `"CATEGORY/NAME"` pair
+    for anything not yet confirmed against the real API. The raw form is an
+    escape hatch on purpose — the taxonomy is closed and undocumented, and
+    being able to send an unverified pair beats being unable to program an
+    exercise at all.
+    """
+    key = name.strip()
+    if "/" in key:
+        category, _, exercise = key.partition("/")
+        if not category.strip() or not exercise.strip():
+            raise WorkoutSpecError(
+                f"raw exercise {name!r} must look like CATEGORY/EXERCISE_NAME",
+                hint="for example BENCH_PRESS/BARBELL_BENCH_PRESS",
+            )
+        return category.strip().upper(), exercise.strip().upper()
+
+    if key.lower() in _EXERCISES:
+        return _EXERCISES[key.lower()]
+
+    # A bare category, with no variant under it. Garmin accepts this — its
+    # own warm-up steps are written that way — and it is what makes the
+    # accessory half of a session programmable: "row" is a fact from the FIT
+    # profile, where "BARBELL_ROW" would be a guess that only fails on the
+    # watch, mid-session.
+    if key.lower() in CATEGORY_NAMES:
+        return key.upper(), ""
+
+    raise WorkoutSpecError(
+        f"unknown exercise {name!r}; confirmed variants are {sorted(_EXERCISES)}",
+        hint="or use a bare category from the FIT taxonomy (row, squat, "
+        "triceps_extension...), or a raw CATEGORY/EXERCISE_NAME pair",
+    )
+
+
 def _silent_target_note(step: Step) -> str | None:
     """Text form of a target the watch will not alert on."""
     if step.target_pace and not step.alert:
@@ -265,6 +369,16 @@ def _build_step(step: Step, order: int) -> Any:
     if step.duration_s is not None:
         payload["endCondition"] = _enum(_END_CONDITIONS, "time", "conditionTypeId")
         payload["endConditionValue"] = float(step.duration_s)
+    elif step.reps is not None:
+        payload["endCondition"] = _enum(_END_CONDITIONS, "reps", "conditionTypeId")
+        payload["endConditionValue"] = float(step.reps)
+        category, exercise = resolve_exercise(step.exercise or "")
+        payload["category"] = category
+        payload["exerciseName"] = exercise
+        # Garmin wants the unit alongside the number even when there is no
+        # load — a bodyweight set is weightValue 0, not a missing field.
+        payload["weightValue"] = float(step.weight_kg or 0)
+        payload["weightUnit"] = dict(_WEIGHT_UNIT)
     else:
         payload["endCondition"] = _enum(_END_CONDITIONS, "distance", "conditionTypeId")
         payload["endConditionValue"] = float(step.distance_m or 0)
@@ -317,6 +431,7 @@ def build_workout(spec: WorkoutSpec) -> Any:
     from garminconnect.workout import (
         CyclingWorkout,
         RunningWorkout,
+        StrengthWorkout,
         SwimmingWorkout,
         WorkoutSegment,
     )
@@ -339,6 +454,7 @@ def build_workout(spec: WorkoutSpec) -> Any:
         "running": RunningWorkout,
         "cycling": CyclingWorkout,
         "swimming": SwimmingWorkout,
+        "strength": StrengthWorkout,
     }[spec.sport]
 
     return model(
@@ -374,6 +490,9 @@ _STEP_KEYS = {
     "kind",
     "duration_s",
     "distance_m",
+    "reps",
+    "exercise",
+    "weight_kg",
     "target_pace",
     "pace_tolerance_s",
     "alert",
@@ -404,6 +523,9 @@ def _step_from_dict(raw: dict[str, Any]) -> Step:
         kind=raw.get("kind", "interval"),
         duration_s=raw.get("duration_s"),
         distance_m=raw.get("distance_m"),
+        reps=raw.get("reps"),
+        exercise=raw.get("exercise"),
+        weight_kg=raw.get("weight_kg"),
         target_pace=raw.get("target_pace"),
         pace_tolerance_s=int(raw.get("pace_tolerance_s", 5)),
         alert=bool(raw.get("alert", True)),

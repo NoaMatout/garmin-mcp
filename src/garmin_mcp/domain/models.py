@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 Source = Literal["garmin", "manual"]
@@ -128,6 +128,39 @@ class Lap:
 
 
 @dataclass(slots=True)
+class StrengthSet:
+    """One set of a strength session, as the watch recorded it.
+
+    A strength FIT file carries a `set` message per set *and* per rest, which
+    is why `is_rest` exists rather than rests being dropped: the gap between
+    two working sets is training data, and an athlete who cut their rests
+    short did a different session from the one prescribed.
+
+    `weight_kg` is the load the athlete handled, which for a weighted pull-up
+    is the weight added rather than the system weight — the same convention
+    the workout is written in, so a prescription and its result compare
+    directly.
+    """
+
+    set_index: int
+    is_rest: bool = False
+    start_time_utc: datetime | None = None
+    duration_s: float | None = None
+    repetitions: int | None = None
+    weight_kg: float | None = None
+    # The movement, from Garmin's taxonomy: "bench_press", "pull_up".
+    category: str | None = None
+    # Which variant within that category — barbell vs dumbbell, weighted vs
+    # not. The FIT profile resolves it to a bare integer whose meaning depends
+    # on the category, and no published table maps the pair to a name, so it
+    # is stored as the number it is rather than dressed up as one.
+    exercise_subtype: int | None = None
+    # Which prescribed step this set belongs to, when the session was run from
+    # a structured workout. Written by the watch, so the mapping is exact.
+    wkt_step_index: int | None = None
+
+
+@dataclass(slots=True)
 class Activity:
     """One FIT `session` message, or a synthetic multisport parent."""
 
@@ -181,6 +214,7 @@ class Activity:
 
     laps: list[Lap] = field(default_factory=list)
     records: list[Record] = field(default_factory=list)
+    sets: list[StrengthSet] = field(default_factory=list)
     planned_steps: list[PlannedStep] = field(default_factory=list)
     workout_name: str | None = None
 
@@ -230,6 +264,113 @@ class ParsedFit:
     @property
     def total_records(self) -> int:
         return sum(len(a.records) for a in self.activities)
+
+
+@dataclass(slots=True)
+class SleepSession:
+    """One night's sleep, from Garmin's daily-sleep summary.
+
+    Unlike an `Activity`, this has no file behind it — it comes straight from
+    an API response, refreshed on a rolling window rather than fetched once,
+    because Garmin keeps revising a night's numbers for hours after the
+    athlete wakes up. `calendar_date` is the date Garmin buckets the night
+    under, not the date it ends on.
+
+    A night the watch detected nothing for is absent from the database
+    entirely rather than stored as zeros — `sleep_parser.parse_sleep` returns
+    `None` for it, so "no row" and "no sleep" cannot be confused.
+    """
+
+    calendar_date: date
+    source: Source = "garmin"
+
+    sleep_start_utc: datetime | None = None
+    sleep_end_utc: datetime | None = None
+    sleep_start_local: datetime | None = None
+    sleep_end_local: datetime | None = None
+
+    total_sleep_s: float | None = None
+    nap_s: float | None = None
+    deep_sleep_s: float | None = None
+    light_sleep_s: float | None = None
+    rem_sleep_s: float | None = None
+    awake_s: float | None = None
+
+    avg_hrv: float | None = None
+    avg_spo2: float | None = None
+    avg_respiration: float | None = None
+    lowest_respiration: float | None = None
+    highest_respiration: float | None = None
+
+    sleep_score: int | None = None
+    sleep_quality: str | None = None  # POOR | FAIR | GOOD | EXCELLENT
+
+    # Reported alongside sleep because Garmin computes them overnight, not
+    # because they are sleep metrics themselves — useful recovery context.
+    hrv_status: str | None = None  # BALANCED | UNBALANCED | LOW | ...
+    resting_heart_rate: int | None = None
+    body_battery_change: int | None = None  # net change while asleep
+
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CourseTrackPoint:
+    """One GPS point of a saved course's route, in recording order."""
+
+    point_index: int
+    lat: float | None = None
+    lon: float | None = None
+    elevation_m: float | None = None
+    distance_m: float | None = None  # cumulative from the course start
+
+
+@dataclass(slots=True)
+class CourseWaypoint:
+    """A named point on a course — an aid station, a summit, a turn to watch.
+
+    Garmin calls these `coursePoints`; renamed here because "course point"
+    reads as a synonym for the track points above, and the two are unrelated
+    (a waypoint is authored by hand, a track point is one of a thousand GPS
+    fixes).
+    """
+
+    waypoint_index: int
+    name: str | None = None
+    point_type: str | None = None  # GENERIC | SUMMIT | AID_STATION | ...
+    distance_m: float | None = None  # cumulative from the course start
+    lat: float | None = None
+    lon: float | None = None
+    elevation_m: float | None = None
+
+
+@dataclass(slots=True)
+class Course:
+    """A saved route (Garmin: a "course") — a plan to run, not a run itself.
+
+    Distinct from `Activity` in kind, not just in state: nothing here was
+    ever executed by the athlete. It has no heart rate, no pace, no laps —
+    only the geometry someone (the athlete, or whoever the GPX came from)
+    laid out in advance. An activity later run from it is a separate row,
+    linked by nothing in this database, because Garmin's course API gives no
+    such link either.
+    """
+
+    course_id: int
+    name: str | None = None
+    sport: str | None = None  # trail_running | running | cycling | ...
+    distance_m: float | None = None
+    elevation_gain_m: float | None = None
+    elevation_loss_m: float | None = None
+    start_lat: float | None = None
+    start_lon: float | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    favorite: bool = False
+
+    track: list[CourseTrackPoint] = field(default_factory=list)
+    waypoints: list[CourseWaypoint] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

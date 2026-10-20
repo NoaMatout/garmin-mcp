@@ -34,6 +34,8 @@ log = get_logger(__name__)
 class WritesDisabledError(GarminMcpError):
     """Writing to Garmin is switched off."""
 
+    code = "writes_disabled"
+
     def __init__(self) -> None:
         super().__init__(
             "writing to Garmin is disabled",
@@ -169,6 +171,18 @@ def unschedule(schedule_id: int, settings: Settings | None = None) -> None:
     log.info("workout.unscheduled", schedule_id=schedule_id)
 
 
+# The library exposes one upload method per sport, so a sport that builds
+# correctly can still fail here. Kept beside the spec's own sport table and
+# checked against it by a test, because the failure is a bare KeyError raised
+# only once the athlete has asked for the workout to be created.
+UPLOAD_METHODS: dict[str, str] = {
+    "running": "upload_running_workout",
+    "cycling": "upload_cycling_workout",
+    "swimming": "upload_swimming_workout",
+    "strength": "upload_strength_workout",
+}
+
+
 def create_workout(
     spec: WorkoutSpec,
     settings: Settings | None = None,
@@ -186,11 +200,7 @@ def create_workout(
     payload = build_workout(spec)  # validates as a side effect
     client = _client(settings)
 
-    upload = {
-        "running": "upload_running_workout",
-        "cycling": "upload_cycling_workout",
-        "swimming": "upload_swimming_workout",
-    }[spec.sport]
+    upload = UPLOAD_METHODS[spec.sport]
 
     try:
         response = getattr(client, upload)(payload)

@@ -26,6 +26,7 @@ from garmin_mcp.garmin.workouts import (
     WorkoutSpecError,
     build_workout,
     parse_pace,
+    resolve_exercise,
     spec_from_dict,
 )
 from garmin_mcp.server import tools
@@ -523,3 +524,149 @@ class TestCalendarVisibility:
         result = tools.unschedule_workout(111)
         assert result["unscheduled"] is False
         assert "stays in the library" in result["note"]
+
+
+# The two sets that actually matter on a strength day, in the shape the tool
+# receives them: a heavy triple with a load, and the rest that follows it.
+STRENGTH = [
+    {"kind": "warmup", "duration_s": 600},
+    {
+        "times": 4,
+        "steps": [
+            {
+                "kind": "interval",
+                "reps": 3,
+                "exercise": "weighted_pull_up",
+                "weight_kg": 45,
+            },
+            {"kind": "rest", "duration_s": 210},
+        ],
+    },
+]
+
+
+class TestStrengthSpec:
+    def test_a_set_counted_in_reps_needs_an_exercise(self) -> None:
+        # Reps with no movement shows a bare counter on the watch.
+        with pytest.raises(WorkoutSpecError, match="needs an exercise"):
+            Step("interval", reps=3).validate()
+
+    def test_reps_is_an_end_condition_like_the_others(self) -> None:
+        with pytest.raises(WorkoutSpecError, match="exactly one"):
+            Step("interval", reps=3, duration_s=60, exercise="bench_press").validate()
+
+    def test_a_load_without_reps_is_refused(self) -> None:
+        """Weight on a timed step is a spec that means nothing."""
+        with pytest.raises(WorkoutSpecError, match="only means anything"):
+            Step("interval", duration_s=60, weight_kg=100).validate()
+
+    def test_an_unknown_exercise_lists_the_confirmed_ones(self) -> None:
+        with pytest.raises(WorkoutSpecError, match="unknown exercise"):
+            Step("interval", reps=3, exercise="clean_and_jerk").validate()
+
+    def test_a_raw_pair_gets_through_for_unconfirmed_exercises(self) -> None:
+        assert resolve_exercise("ROW/BARBELL_ROW") == ("ROW", "BARBELL_ROW")
+        assert resolve_exercise("row/barbell_row") == ("ROW", "BARBELL_ROW")
+
+    def test_a_malformed_raw_pair_is_refused(self) -> None:
+        with pytest.raises(WorkoutSpecError, match="CATEGORY/EXERCISE_NAME"):
+            resolve_exercise("BENCH_PRESS/")
+
+
+class TestStrengthPayload:
+    def test_a_set_carries_the_exercise_and_the_load(self) -> None:
+        spec = spec_from_dict({"name": "Upper", "sport": "strength", "blocks": STRENGTH})
+        first_set = _steps_of(build_workout(spec))[1]["workoutSteps"][0]
+
+        assert first_set["endCondition"]["conditionTypeKey"] == "reps"
+        assert first_set["endConditionValue"] == 3
+        assert first_set["category"] == "PULL_UP"
+        assert first_set["exerciseName"] == "WEIGHTED_PULL_UP"
+        assert first_set["weightValue"] == 45.0
+        assert first_set["weightUnit"]["unitKey"] == "kilogram"
+
+    def test_a_bodyweight_set_sends_zero_rather_than_nothing(self) -> None:
+        # Garmin wants the unit alongside the number either way; a missing
+        # field is not the same as an unloaded set.
+        spec = spec_from_dict(
+            {
+                "name": "Bodyweight",
+                "sport": "strength",
+                "blocks": [{"kind": "interval", "reps": 10, "exercise": "weighted_pull_up"}],
+            }
+        )
+        step = _steps_of(build_workout(spec))[0]
+        assert step["weightValue"] == 0.0
+
+    def test_the_rest_between_sets_stays_a_timed_step(self) -> None:
+        spec = spec_from_dict({"name": "Upper", "sport": "strength", "blocks": STRENGTH})
+        rest = _steps_of(build_workout(spec))[1]["workoutSteps"][1]
+        assert rest["endCondition"]["conditionTypeKey"] == "time"
+        assert rest["endConditionValue"] == 210
+        # A rest carries no exercise — it is not a set.
+        assert "exerciseName" not in rest
+
+    def test_the_workout_is_typed_as_strength_training(self) -> None:
+        spec = spec_from_dict({"name": "Upper", "sport": "strength", "blocks": STRENGTH})
+        payload = build_workout(spec).model_dump(exclude_none=True)
+        assert payload["sportType"]["sportTypeKey"] == "strength_training"
+
+    def test_the_description_reads_like_a_strength_session(self) -> None:
+        spec = spec_from_dict({"name": "Upper", "sport": "strength", "blocks": STRENGTH})
+        assert "4 × (interval 3 × weighted_pull_up @ 45 kg" in spec.describe()
+
+
+class TestSportCoverage:
+    def test_every_buildable_sport_can_actually_be_uploaded(self) -> None:
+        """A sport can build correctly and still have no way to be sent.
+
+        The two tables live in different modules, so adding a sport to one
+        and forgetting the other raises a bare KeyError — at the moment the
+        athlete asks for the workout, having already seen the preview.
+        """
+        from garmin_mcp.garmin.workout_writer import UPLOAD_METHODS
+        from garmin_mcp.garmin.workouts import _SPORT_TYPES
+
+        assert set(UPLOAD_METHODS) == set(_SPORT_TYPES)
+
+    def test_the_upload_methods_exist_on_the_client(self) -> None:
+        from garminconnect import Garmin
+
+        from garmin_mcp.garmin.workout_writer import UPLOAD_METHODS
+
+        missing = [m for m in UPLOAD_METHODS.values() if not hasattr(Garmin, m)]
+        assert not missing
+
+
+class TestBareCategories:
+    """A category with no variant is a fact; a guessed variant is not.
+
+    Garmin writes its own warm-up steps this way, which is what makes the
+    accessory half of a session programmable without inventing names that
+    only fail on the watch.
+    """
+
+    def test_a_bare_category_resolves_with_no_variant(self) -> None:
+        assert resolve_exercise("row") == ("ROW", "")
+        assert resolve_exercise("triceps_extension") == ("TRICEPS_EXTENSION", "")
+        assert resolve_exercise("shoulder_stability") == ("SHOULDER_STABILITY", "")
+
+    def test_a_confirmed_variant_still_wins_over_its_category(self) -> None:
+        # bench_press is both a category and a confirmed pair; the pair wins.
+        assert resolve_exercise("bench_press") == ("BENCH_PRESS", "BARBELL_BENCH_PRESS")
+
+    def test_something_in_neither_table_is_still_refused(self) -> None:
+        with pytest.raises(WorkoutSpecError, match="unknown exercise"):
+            resolve_exercise("bulgarian_split_squat")
+
+    def test_a_bare_category_builds_a_sendable_step(self) -> None:
+        spec = spec_from_dict(
+            {
+                "name": "Renfo",
+                "sport": "strength",
+                "blocks": [{"kind": "interval", "reps": 12, "exercise": "row"}],
+            }
+        )
+        step = _steps_of(build_workout(spec))[0]
+        assert step["category"] == "ROW"
+        assert step["exerciseName"] == ""

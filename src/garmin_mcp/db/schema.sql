@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS laps (
     PRIMARY KEY (activity_id, lap_index)
 );
 
+-- ─── Strength sets ────────────────────────────────────────────────────
+-- One row per set *and* per rest, as the watch records them. Rests are kept
+-- rather than filtered out: the gap between two working sets is training
+-- data, and an athlete who cut their rests short did a different session
+-- from the one prescribed.
+CREATE TABLE IF NOT EXISTS strength_sets (
+    activity_id    BIGINT  NOT NULL,
+    set_index      INTEGER NOT NULL,
+    is_rest        BOOLEAN NOT NULL DEFAULT FALSE,
+    start_time_utc TIMESTAMPTZ,
+    duration_s     DOUBLE,
+    repetitions    INTEGER,
+    -- The load handled, which for a weighted pull-up is the weight added
+    -- rather than the system weight — the same convention the workout is
+    -- written in, so a prescription and its result compare directly.
+    weight_kg      DOUBLE,
+    category       VARCHAR,   -- the movement: bench_press, pull_up
+    -- Which variant within the category. The FIT profile resolves it to a
+    -- bare integer whose meaning depends on the category, and no published
+    -- table maps the pair to a name, so it is kept as the number it is.
+    exercise_subtype INTEGER,
+    wkt_step_index INTEGER,
+    PRIMARY KEY (activity_id, set_index)
+);
+
 -- ─── The prescription ─────────────────────────────────────────────────
 -- Present only for sessions started from a structured workout on the watch.
 -- The plan travels inside the FIT file itself, so intent and execution can be
@@ -166,6 +191,97 @@ CREATE TABLE IF NOT EXISTS records (
     accumulated_power_w     BIGINT,
 
     extra                   JSON
+);
+
+-- ─── Sleep ────────────────────────────────────────────────────────────
+-- One row per night, keyed by the calendar date Garmin buckets it under.
+-- Refreshed on a rolling window rather than fetched once and left alone:
+-- Garmin keeps revising a night's numbers for hours after the athlete wakes,
+-- so the ingest worker re-upserts the last few days on every sync cycle
+-- instead of only backfilling what is missing.
+CREATE TABLE IF NOT EXISTS sleep_sessions (
+    calendar_date        DATE PRIMARY KEY,
+    source                VARCHAR NOT NULL DEFAULT 'garmin',
+
+    sleep_start_utc       TIMESTAMPTZ,
+    sleep_end_utc         TIMESTAMPTZ,
+    sleep_start_local     TIMESTAMP,
+    sleep_end_local       TIMESTAMP,
+
+    total_sleep_s         DOUBLE,
+    nap_s                  DOUBLE,
+    deep_sleep_s           DOUBLE,
+    light_sleep_s          DOUBLE,
+    rem_sleep_s            DOUBLE,
+    awake_s                DOUBLE,
+
+    avg_hrv                DOUBLE,
+    avg_spo2                DOUBLE,
+    avg_respiration        DOUBLE,
+    lowest_respiration     DOUBLE,
+    highest_respiration    DOUBLE,
+
+    sleep_score            INTEGER,
+    sleep_quality          VARCHAR,   -- POOR | FAIR | GOOD | EXCELLENT
+
+    -- Computed overnight, not sleep metrics themselves, but useful recovery
+    -- context alongside them.
+    hrv_status              VARCHAR,   -- BALANCED | UNBALANCED | LOW | ...
+    resting_heart_rate      SMALLINT,
+    body_battery_change     INTEGER,
+
+    ingested_at            TIMESTAMPTZ NOT NULL,
+    extra                   JSON
+);
+
+-- ─── Courses ──────────────────────────────────────────────────────────
+-- Saved routes ("courses" in Garmin's own vocabulary): a plan to run, not a
+-- run itself. Reached through course-service, an endpoint no Python client
+-- documents — see garmin/course_reader.py for how that was confirmed. Static
+-- once created from the athlete's side, so unlike activities and sleep this
+-- is fetched once per course, not refreshed on a rolling window.
+CREATE TABLE IF NOT EXISTS courses (
+    course_id            BIGINT PRIMARY KEY,
+    name                  VARCHAR,
+    sport                 VARCHAR,       -- trail_running | running | cycling | ...
+    distance_m            DOUBLE,
+    elevation_gain_m       DOUBLE,
+    elevation_loss_m       DOUBLE,
+    start_lat              DOUBLE,
+    start_lon              DOUBLE,
+    created_at             TIMESTAMPTZ,
+    updated_at             TIMESTAMPTZ,
+    favorite               BOOLEAN,
+
+    ingested_at            TIMESTAMPTZ NOT NULL,
+    extra                   JSON
+);
+
+-- One row per GPS fix along the route. Ordinary table size for a trail
+-- course (hundreds to a couple thousand points) — nowhere near `records`
+-- territory, so a composite primary key costs nothing here.
+CREATE TABLE IF NOT EXISTS course_points (
+    course_id     BIGINT  NOT NULL,
+    point_index   INTEGER NOT NULL,
+    lat            DOUBLE,
+    lon            DOUBLE,
+    elevation_m    DOUBLE,
+    distance_m     DOUBLE,   -- cumulative from the course start
+    PRIMARY KEY (course_id, point_index)
+);
+
+-- Named points the course's author placed by hand — an aid station, a
+-- summit, a turn worth flagging. What a nutrition or pacing plan hangs off.
+CREATE TABLE IF NOT EXISTS course_waypoints (
+    course_id       BIGINT  NOT NULL,
+    waypoint_index  INTEGER NOT NULL,
+    name             VARCHAR,
+    point_type       VARCHAR,
+    distance_m       DOUBLE,   -- cumulative from the course start
+    lat              DOUBLE,
+    lon              DOUBLE,
+    elevation_m      DOUBLE,
+    PRIMARY KEY (course_id, waypoint_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_activity_ts ON records (activity_id, ts);

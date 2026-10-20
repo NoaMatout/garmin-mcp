@@ -123,6 +123,20 @@ def activity_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     }
 
 
+def sleep_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """Headline numbers for `database_status` — mirrors `activity_counts`."""
+    nights, first, last = _one(
+        conn.execute("SELECT count(*), min(calendar_date), max(calendar_date) FROM sleep_sessions")
+    )
+    return {"nights": nights, "first_night": first, "last_night": last}
+
+
+def course_ids_with_detail(conn: duckdb.DuckDBPyConnection) -> set[int]:
+    """Courses whose geometry is already stored — the expensive fetch to skip."""
+    rows = conn.execute("SELECT DISTINCT course_id FROM course_points").fetchall()
+    return {int(row[0]) for row in rows}
+
+
 def volume_by_sport(
     conn: duckdb.DuckDBPyConnection,
     since: date | None = None,
@@ -428,6 +442,160 @@ def stream_extrema(
     return extrema
 
 
+def list_courses(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    sport: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Saved courses, newest first."""
+    sql = """
+        SELECT course_id, name, sport, distance_m, elevation_gain_m,
+               elevation_loss_m, favorite, created_at,
+               EXISTS (
+                   SELECT 1 FROM course_points p WHERE p.course_id = c.course_id
+               ) AS has_geometry
+        FROM courses c WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if sport is not None:
+        sql += " AND sport = ?"
+        params.append(sport)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def get_course(conn: duckdb.DuckDBPyConnection, course_id: int) -> dict[str, Any] | None:
+    result = conn.execute(
+        "SELECT * EXCLUDE (extra) FROM courses WHERE course_id = ?", [course_id]
+    )
+    row = result.fetchone()
+    if row is None:
+        return None
+    return dict(zip([d[0] for d in result.description], row, strict=True))
+
+
+def get_course_waypoints(
+    conn: duckdb.DuckDBPyConnection, course_id: int
+) -> list[dict[str, Any]]:
+    result = conn.execute(
+        """
+        SELECT waypoint_index, name, point_type, distance_m, elevation_m
+        FROM course_waypoints WHERE course_id = ? ORDER BY waypoint_index
+        """,
+        [course_id],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def count_course_points(conn: duckdb.DuckDBPyConnection, course_id: int) -> int:
+    return int(
+        _one(
+            conn.execute("SELECT count(*) FROM course_points WHERE course_id = ?", [course_id])
+        )[0]
+    )
+
+
+def get_course_profile(
+    conn: duckdb.DuckDBPyConnection,
+    course_id: int,
+    *,
+    max_points: int = 100,
+) -> dict[str, list[Any]]:
+    """Down-sampled distance/elevation profile — enough to read the terrain
+    shape without spending tokens on a couple thousand raw GPS points.
+
+    Elevation is averaged per bucket like `get_streams` does for activities;
+    distance takes the last value in the bucket, since it is cumulative and
+    averaging a cumulative counter is meaningless.
+    """
+    total = count_course_points(conn, course_id)
+    if total == 0:
+        return {"distance_m": [], "elevation_m": []}
+
+    bucket_size = max(1, -(-total // max_points))
+    result = conn.execute(
+        """
+        SELECT last(distance_m ORDER BY point_index) AS distance_m,
+               avg(elevation_m) AS elevation_m
+        FROM (
+            SELECT *, (row_number() OVER (ORDER BY point_index) - 1) // ? AS bucket
+            FROM course_points WHERE course_id = ?
+        )
+        GROUP BY bucket ORDER BY bucket
+        """,
+        [bucket_size, course_id],
+    )
+    columns = [d[0] for d in result.description]
+    rows = result.fetchall()
+    return {column: [row[i] for row in rows] for i, column in enumerate(columns)}
+
+
+def course_segment_gain(
+    conn: duckdb.DuckDBPyConnection,
+    course_id: int,
+    from_m: float,
+    to_m: float,
+) -> float:
+    """Elevation gained between two distances along a course's track.
+
+    Computed from consecutive point-to-point deltas at full resolution —
+    `get_course_profile`'s down-sampling would average away exactly the
+    short, steep climbs a fuelling plan most needs to see.
+    """
+    row = _one(
+        conn.execute(
+            """
+            WITH deltas AS (
+                SELECT distance_m,
+                       elevation_m - LAG(elevation_m) OVER (ORDER BY point_index) AS delta
+                FROM course_points WHERE course_id = ?
+            )
+            SELECT coalesce(sum(delta), 0)
+            FROM deltas
+            WHERE delta > 0 AND distance_m >= ? AND distance_m <= ?
+            """,
+            [course_id, from_m, to_m],
+        )
+    )
+    return float(row[0])
+
+
+def sleep_history(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Nightly sleep, most recent first."""
+    sql = """
+        SELECT calendar_date, sleep_start_local, sleep_end_local, total_sleep_s,
+               nap_s, deep_sleep_s, light_sleep_s, rem_sleep_s, awake_s,
+               avg_hrv, avg_spo2, avg_respiration, sleep_score, sleep_quality,
+               hrv_status, resting_heart_rate, body_battery_change
+        FROM sleep_sessions WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if since is not None:
+        sql += " AND calendar_date >= ?"
+        params.append(since)
+    if until is not None:
+        sql += " AND calendar_date <= ?"
+        params.append(until)
+    sql += " ORDER BY calendar_date DESC LIMIT ?"
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
 def get_planned_steps(conn: duckdb.DuckDBPyConnection, activity_id: int) -> list[dict[str, Any]]:
     """The structured workout this activity was run from, if any."""
     result = conn.execute(
@@ -502,3 +670,345 @@ def activities_with_plan_flag(
     )
     columns = [d[0] for d in result.description]
     return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def strength_sets(conn: duckdb.DuckDBPyConnection, activity_id: int) -> list[dict[str, Any]]:
+    """Every set of one strength session, rests included, in the order done."""
+    result = conn.execute(
+        """
+        SELECT set_index, is_rest, start_time_utc, duration_s, repetitions,
+               weight_kg, category, exercise_subtype, wkt_step_index
+        FROM strength_sets
+        WHERE activity_id = ?
+        ORDER BY set_index
+        """,
+        [activity_id],
+    )
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+def strength_history(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    exercise: str | None = None,
+    since: date | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Working sets across sessions, most recent first.
+
+    Rests are excluded here — this answers "how has the bench moved", and a
+    rest is not a data point about that. `strength_sets` keeps them for
+    anyone asking about one session in detail.
+
+    Grouped per (session, exercise, load) so a back-off block reads as one
+    line rather than four identical ones, which is how the prescription was
+    written in the first place.
+    """
+    sql = """
+        SELECT a.activity_id,
+               a.start_time_local,
+               a.name,
+               s.category,
+               s.weight_kg,
+               count(*)              AS sets,
+               min(s.repetitions)    AS min_reps,
+               max(s.repetitions)    AS max_reps,
+               sum(s.repetitions)    AS total_reps
+        FROM strength_sets s
+        JOIN activities a USING (activity_id)
+        WHERE NOT s.is_rest
+    """
+    params: list[Any] = []
+    if exercise is not None:
+        sql += " AND lower(s.category) LIKE ?"
+        params.append(f"%{exercise.lower()}%")
+    if since is not None:
+        sql += " AND a.start_time_local >= ?"
+        params.append(datetime.combine(since, datetime.min.time()))
+    sql += """
+        GROUP BY a.activity_id, a.start_time_local, a.name, s.category, s.weight_kg
+        ORDER BY a.start_time_local DESC, s.weight_kg DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    result = conn.execute(sql, params)
+    columns = [d[0] for d in result.description]
+    return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Location queries: finding activities by where they started, and reading
+# back the GPS track that was kept.
+#
+# These read `records`, the per-sample table the FIT parser fills at full
+# resolution — never `get_streams`, which averages into buckets for the
+# conversation and would put the athlete off the road.
+# ══════════════════════════════════════════════════════════════════════
+
+# What counts as a usable fix. Kept identical to `domain.geo.is_valid_fix` —
+# the two are tested against each other — because a search and an export that
+# disagree about validity would report a track the export then cannot produce.
+_VALID_FIX = (
+    "lat IS NOT NULL AND lon IS NOT NULL "
+    "AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 "
+    "AND NOT (lat = 0 AND lon = 0)"
+)
+
+# Whitelisted ORDER BY clauses. The sort name arrives from a model; it selects
+# one of these and is never placed in the SQL text itself.
+_LOCAL_SORTS: dict[str, str] = {
+    "nearest": "start_distance_m ASC, start_time_local DESC, activity_id",
+    "recent": "start_time_local DESC, activity_id",
+}
+
+# Which stored duration a range applies to. Moving time stops when the watch
+# is paused; elapsed time does not. Neither is ever substituted for the other.
+_DURATION_COLUMNS: dict[str, str] = {
+    "moving": "total_timer_time_s",
+    "elapsed": "total_elapsed_time_s",
+}
+
+
+def find_activities_near(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    lat: float,
+    lon: float,
+    radius_m: float,
+    sport: str | None = "running",
+    sub_sport: str | None = None,
+    min_distance_m: float | None = None,
+    max_distance_m: float | None = None,
+    min_ascent_m: float | None = None,
+    max_ascent_m: float | None = None,
+    min_duration_s: float | None = None,
+    max_duration_s: float | None = None,
+    duration_basis: str = "moving",
+    sort: str = "nearest",
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Activities that *started* within `radius_m` of a point, and how many match.
+
+    The radius applies to the start point recorded in the activity summary —
+    not to any other point of the track. A run that starts 30 km away and
+    passes through the centre of the circle is not found, by design.
+
+    A range bound on a measure the activity does not have (no ascent recorded)
+    excludes it: a missing value cannot satisfy "at least 800 m of climb".
+    Returns the page and the total before pagination, from one scan.
+    """
+    from garmin_mcp.domain.geo import EARTH_RADIUS_M, bounding_box
+
+    if sort not in _LOCAL_SORTS:
+        raise ValueError(f"unknown sort {sort!r}; available: {sorted(_LOCAL_SORTS)}")
+    if duration_basis not in _DURATION_COLUMNS:
+        raise ValueError(
+            f"unknown duration_basis {duration_basis!r}; available: {sorted(_DURATION_COLUMNS)}"
+        )
+    duration_column = _DURATION_COLUMNS[duration_basis]
+
+    lat_min, lat_max, lon_min, lon_max = bounding_box(lat, lon, radius_m)
+
+    where = [
+        "start_lat IS NOT NULL",
+        "start_lon IS NOT NULL",
+        "start_lat BETWEEN ? AND ?",
+    ]
+    params: list[Any] = [lat_min, lat_max]
+    if lon_min is not None and lon_max is not None:
+        where.append("start_lon BETWEEN ? AND ?")
+        params += [lon_min, lon_max]
+    if sport is not None:
+        where.append("sport = ?")
+        params.append(sport)
+    if sub_sport is not None:
+        where.append("sub_sport = ?")
+        params.append(sub_sport)
+
+    for column, low, high in (
+        ("total_distance_m", min_distance_m, max_distance_m),
+        ("total_ascent_m", min_ascent_m, max_ascent_m),
+        (duration_column, min_duration_s, max_duration_s),
+    ):
+        if low is not None:
+            where.append(f"{column} >= ?")
+            params.append(low)
+        if high is not None:
+            where.append(f"{column} <= ?")
+            params.append(high)
+
+    candidates = f"""
+        WITH candidates AS (
+            SELECT activity_id, parent_activity_id, name, sport, sub_sport,
+                   start_time_local, start_lat, start_lon,
+                   total_distance_m, total_ascent_m, total_descent_m,
+                   total_timer_time_s, total_elapsed_time_s,
+                   2 * {EARTH_RADIUS_M} * asin(least(1.0, sqrt(
+                       pow(sin(radians(start_lat - ?) / 2), 2)
+                       + cos(radians(?)) * cos(radians(start_lat))
+                         * pow(sin(radians(start_lon - ?) / 2), 2)
+                   ))) AS start_distance_m
+            FROM activities
+            WHERE {" AND ".join(where)}
+        )
+    """
+    # The three leading parameters belong to the distance expression, which
+    # comes before the WHERE clause in the statement text.
+    bound = [lat, lat, lon, *params, radius_m]
+
+    result = conn.execute(
+        candidates
+        + f"""
+        SELECT *, count(*) OVER () AS total_matches
+        FROM candidates
+        WHERE start_distance_m <= ?
+        ORDER BY {_LOCAL_SORTS[sort]}
+        LIMIT ? OFFSET ?
+        """,
+        [*bound, limit, offset],
+    )
+    columns = [d[0] for d in result.description]
+    rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+
+    if rows:
+        total = int(rows[0]["total_matches"])
+    elif offset > 0:
+        # A page past the end carries no row to read the total from.
+        total = int(
+            _one(
+                conn.execute(
+                    candidates + "SELECT count(*) FROM candidates WHERE start_distance_m <= ?",
+                    bound,
+                )
+            )[0]
+        )
+    else:
+        total = 0
+    for row in rows:
+        del row["total_matches"]
+    return rows, total
+
+
+def gps_quality(
+    conn: duckdb.DuckDBPyConnection,
+    activity_ids: list[int],
+    gap_threshold_s: float,
+) -> dict[int, dict[str, Any]]:
+    """Per-activity GPS evidence, computed from the stored samples.
+
+    One scan for the whole page. Returns, for each id: how many samples exist,
+    how many carry a valid fix and an altitude, when the first and last fixes
+    happened, how many holes longer than the threshold there are, and the
+    longest one. An id with no samples at all is simply absent.
+    """
+    if not activity_ids:
+        return {}
+
+    result = conn.execute(
+        f"""
+        WITH ids AS (SELECT unnest(?::BIGINT[]) AS activity_id),
+        totals AS (
+            SELECT activity_id, count(*) AS samples, max(elapsed_s) AS last_sample_s
+            FROM records WHERE activity_id IN (SELECT activity_id FROM ids)
+            GROUP BY activity_id
+        ),
+        fixes AS (
+            SELECT activity_id, elapsed_s, altitude_m,
+                   elapsed_s - lag(elapsed_s) OVER (
+                       PARTITION BY activity_id ORDER BY ts, elapsed_s
+                   ) AS gap_s
+            FROM records
+            WHERE activity_id IN (SELECT activity_id FROM ids) AND {_VALID_FIX}
+        ),
+        fix_stats AS (
+            SELECT activity_id,
+                   count(*)                                  AS gps_points,
+                   count(altitude_m)                         AS altitude_points,
+                   min(elapsed_s)                            AS first_fix_s,
+                   max(elapsed_s)                            AS last_fix_s,
+                   count(*) FILTER (WHERE gap_s > ?)         AS interruptions,
+                   max(gap_s)                                AS longest_gap_s
+            FROM fixes GROUP BY activity_id
+        )
+        SELECT t.activity_id, t.samples, t.last_sample_s,
+               coalesce(f.gps_points, 0)      AS gps_points,
+               coalesce(f.altitude_points, 0) AS altitude_points,
+               f.first_fix_s, f.last_fix_s,
+               coalesce(f.interruptions, 0)   AS interruptions,
+               f.longest_gap_s
+        FROM totals t LEFT JOIN fix_stats f USING (activity_id)
+        """,
+        [activity_ids, gap_threshold_s],
+    )
+    columns = [d[0] for d in result.description]
+    return {
+        int(row[0]): dict(zip(columns, row, strict=True)) for row in result.fetchall()
+    }
+
+
+def get_route_fixes(
+    conn: duckdb.DuckDBPyConnection, activity_id: int, *, limit: int
+) -> list[tuple[Any, ...]]:
+    """Every valid GPS fix of an activity, in recording order.
+
+    Each row: (ts, elapsed_s, lat, lon, altitude_m, distance_m). Stored values
+    only — no interpolation, no smoothing. `limit` is a safety stop, not a
+    page: the caller checks the count first and refuses a track that would not
+    fit rather than silently truncating it.
+    """
+    return conn.execute(
+        f"""
+        SELECT ts, elapsed_s, lat, lon, altitude_m, distance_m
+        FROM records
+        WHERE activity_id = ? AND {_VALID_FIX}
+        ORDER BY ts, elapsed_s
+        LIMIT ?
+        """,
+        [activity_id, limit],
+    ).fetchall()
+
+
+def count_route_fixes(conn: duckdb.DuckDBPyConnection, activity_id: int) -> int:
+    return int(
+        _one(
+            conn.execute(
+                f"SELECT count(*) FROM records WHERE activity_id = ? AND {_VALID_FIX}",
+                [activity_id],
+            )
+        )[0]
+    )
+
+
+def get_course_fixes(conn: duckdb.DuckDBPyConnection, course_id: int) -> list[tuple[Any, ...]]:
+    """A saved course's stored track: (lat, lon, elevation_m, distance_m)."""
+    return conn.execute(
+        """
+        SELECT lat, lon, elevation_m, distance_m
+        FROM course_points WHERE course_id = ? ORDER BY point_index
+        """,
+        [course_id],
+    ).fetchall()
+
+
+def count_activities_with_gps(conn: duckdb.DuckDBPyConnection) -> int:
+    """Activities whose summary carries a start position."""
+    return int(
+        _one(
+            conn.execute(
+                "SELECT count(*) FROM activities WHERE start_lat IS NOT NULL "
+                "AND start_lon IS NOT NULL"
+            )
+        )[0]
+    )
+
+
+def count_courses(conn: duckdb.DuckDBPyConnection) -> int:
+    return int(_one(conn.execute("SELECT count(*) FROM courses"))[0])
+
+
+def schema_version(conn: duckdb.DuckDBPyConnection) -> int | None:
+    row = _one(conn.execute("SELECT max(version) FROM schema_meta"))
+    return int(row[0]) if row[0] is not None else None

@@ -7,9 +7,16 @@ of this system (see README), so those errors carry the most context.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 
 class GarminMcpError(Exception):
     """Base class for everything this project raises on purpose."""
+
+    # A stable, machine-readable identifier. Messages are written for people and
+    # change; a client deciding what to do next (re-authenticate, start the
+    # worker, retry) branches on this instead.
+    code: ClassVar[str] = "error"
 
     def __init__(self, message: str, *, hint: str | None = None) -> None:
         super().__init__(message)
@@ -19,6 +26,10 @@ class GarminMcpError(Exception):
     def __str__(self) -> str:
         return f"{self.message} — {self.hint}" if self.hint else self.message
 
+    def as_dict(self) -> dict[str, str | None]:
+        """The error as data: what happened, in a form to branch on, and what to do."""
+        return {"code": self.code, "message": self.message, "recovery": self.hint}
+
 
 # ─── Garmin ───────────────────────────────────────────────────────────
 
@@ -26,12 +37,16 @@ class GarminMcpError(Exception):
 class GarminError(GarminMcpError):
     """Anything going wrong on the Garmin side."""
 
+    code = "garmin_unavailable"
+
 
 class GarminAuthError(GarminError):
     """Credentials rejected, token expired, or MFA required.
 
     Recoverable by the user, never by the server: re-run `garmin-mcp auth`.
     """
+
+    code = "garmin_auth_required"
 
     def __init__(self, message: str, *, hint: str | None = None) -> None:
         super().__init__(
@@ -48,6 +63,8 @@ class GarminBlockedError(GarminError):
     reason the playwright backend exists.
     """
 
+    code = "garmin_blocked"
+
     def __init__(self, message: str, *, hint: str | None = None) -> None:
         super().__init__(
             message,
@@ -60,12 +77,16 @@ class GarminBlockedError(GarminError):
 class GarminRateLimitError(GarminError):
     """Too many requests — back off rather than retry immediately."""
 
+    code = "garmin_rate_limited"
+
 
 # ─── Ingestion ────────────────────────────────────────────────────────
 
 
 class FitParseError(GarminMcpError):
     """A FIT file could not be decoded, or lacks the messages we require."""
+
+    code = "fit_parse_failed"
 
     def __init__(self, message: str, *, path: str | None = None) -> None:
         super().__init__(message)
@@ -75,12 +96,16 @@ class FitParseError(GarminMcpError):
 class IngestError(GarminMcpError):
     """Storage or database write failed during ingestion."""
 
+    code = "ingest_failed"
+
 
 # ─── Server ───────────────────────────────────────────────────────────
 
 
 class ActivityNotFoundError(GarminMcpError):
     """Requested activity is not in the database."""
+
+    code = "activity_not_found"
 
     def __init__(self, activity_id: int) -> None:
         super().__init__(
@@ -91,8 +116,16 @@ class ActivityNotFoundError(GarminMcpError):
         self.activity_id = activity_id
 
 
+class RouteUnavailableError(GarminMcpError):
+    """A route was asked for that the stored data cannot provide."""
+
+    code = "route_unavailable"
+
+
 class WorkerUnavailableError(GarminMcpError):
     """sync_now was called but no ingest worker picked up the trigger."""
+
+    code = "worker_unavailable"
 
     def __init__(self, message: str) -> None:
         super().__init__(
@@ -104,6 +137,8 @@ class WorkerUnavailableError(GarminMcpError):
 
 class DatabaseLockedError(GarminMcpError):
     """The DuckDB file is held by the writer and did not free up in time."""
+
+    code = "database_locked"
 
     def __init__(self, path: str) -> None:
         super().__init__(

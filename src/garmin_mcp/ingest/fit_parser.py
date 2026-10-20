@@ -35,6 +35,7 @@ from typing import Any
 
 import fitdecode
 
+from garmin_mcp.domain.exercises import CATEGORIES
 from garmin_mcp.domain.models import (
     Activity,
     Lap,
@@ -42,6 +43,7 @@ from garmin_mcp.domain.models import (
     PlannedStep,
     Record,
     Source,
+    StrengthSet,
     synthetic_activity_id,
 )
 from garmin_mcp.domain.units import (
@@ -218,6 +220,8 @@ class _RawFit:
         self.sessions: list[fitdecode.FitDataMessage] = []
         self.laps: list[fitdecode.FitDataMessage] = []
         self.records: list[fitdecode.FitDataMessage] = []
+        # Strength sessions write one `set` message per set and per rest.
+        self.sets: list[fitdecode.FitDataMessage] = []
         # The structured workout the session was run from, when there was one.
         self.workout: fitdecode.FitDataMessage | None = None
         self.workout_steps: list[fitdecode.FitDataMessage] = []
@@ -249,6 +253,8 @@ def _read_messages(path: Path) -> _RawFit:
                         raw.records.append(frame)
                     case "lap":
                         raw.laps.append(frame)
+                    case "set":
+                        raw.sets.append(frame)
                     case "session":
                         raw.sessions.append(frame)
                     case "file_id":
@@ -431,6 +437,56 @@ def _build_lap(
         lap_trigger=_as_str(_val(msg, "lap_trigger")),
         wkt_step_index=_as_int(_val(msg, "wkt_step_index")),
     )
+
+
+def _build_set(msg: fitdecode.FitDataMessage, set_index: int) -> StrengthSet:
+    """Read one `set` message.
+
+    `category` and `category_subtype` are arrays in the FIT profile — a set
+    can in principle be tagged with several movements — but a watch writes one
+    entry, so the first is taken and the rest ignored rather than inventing a
+    representation for a case that does not occur.
+    """
+    return StrengthSet(
+        set_index=set_index,
+        # Anything that is not explicitly active is treated as rest. A set
+        # with no type at all is a rest in every file seen so far, and
+        # counting it as working volume would inflate the session.
+        is_rest=_as_str(_val(msg, "set_type")) != "active",
+        start_time_utc=_as_utc(_first(msg, "start_time", "timestamp")),
+        duration_s=_as_float(_val(msg, "duration")),
+        repetitions=_as_int(_val(msg, "repetitions")),
+        weight_kg=_as_float(_val(msg, "weight")),
+        category=_exercise_category(_first_of_array(_val(msg, "category"))),
+        exercise_subtype=_as_int(_first_of_array(_val(msg, "category_subtype"))),
+        wkt_step_index=_as_int(_val(msg, "wkt_step_index")),
+    )
+
+
+def _exercise_category(value: Any) -> str | None:
+    """Resolve Garmin's exercise category to a name.
+
+    fitdecode resolves this enum in some files and hands back the bare
+    integer in others — real watch files among them, where a pull-up arrives
+    as 21 — so the profile's own table is applied here rather than trusting
+    the decoder to have done it. An unmapped value stays the number it is
+    rather than being dropped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.isdigit():
+        return value
+    try:
+        return CATEGORIES[int(value)]
+    except (KeyError, TypeError, ValueError):
+        return _as_str(value)
+
+
+def _first_of_array(value: Any) -> Any:
+    """Unwrap a FIT array field, which fitdecode hands back as a tuple/list."""
+    if isinstance(value, list | tuple):
+        return value[0] if value else None
+    return value
 
 
 def _build_planned_steps(raw: _RawFit) -> list[PlannedStep]:
@@ -838,6 +894,16 @@ def parse_fit(
         [(ts, m) for m in raw.records if (ts := _as_utc(_val(m, "timestamp"))) is not None],
         windows,
     )
+    # A set's start_time is the useful anchor, but some writers only stamp the
+    # timestamp at its end; either lands the set in the right session.
+    set_buckets = _assign_by_window(
+        [
+            (ts, m)
+            for m in raw.sets
+            if (ts := _as_utc(_first(m, "start_time", "timestamp"))) is not None
+        ],
+        windows,
+    )
 
     activities: list[Activity] = []
     for index, (session_msg, start, start_source) in enumerate(resolved):
@@ -870,6 +936,7 @@ def parse_fit(
         activity.records = _attach_records(
             record_buckets[index], activity.start_time_utc, activity.laps
         )
+        activity.sets = [_build_set(m, i) for i, m in enumerate(set_buckets[index])]
         if raw.truncated:
             activity.extra["_truncated"] = raw.truncation_reason
         # The prescription belongs to the whole file; attach it to the single
